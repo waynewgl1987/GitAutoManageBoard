@@ -676,6 +676,7 @@ mark{background:#fef3c7;border-radius:2px;padding:0 1px}
     <button class="btn btn-primary" id="commit-btn" data-i18n="confirm_commit">Commit</button>
     <button class="btn btn-secondary" id="reset-btn" data-i18n="deselect_all">Deselect All</button>
     <button class="btn btn-secondary" id="refresh-btn" onclick="loadFiles()" data-i18n="refresh">Refresh</button>
+    <button class="btn btn-secondary" onclick="loadIgnored()" title="View and manage .gitignore entries" style="font-size:12px">📋 Gitignore</button>
   </div>
 </div>
 
@@ -1240,10 +1241,55 @@ function renderFiles(files) {
 
 function loadFiles(){apiGet('/api/files',function(data){renderFiles(data.files)})}
 
-function ignoreFile(path){
-  apiPost('/api/ignore',{path:path},function(data){
-    if(data.ok){addMsg(t('ignored_file')+path,'success');loadFiles()}
-    else addMsg(t('ignore_failed')+(data.error||''),'error');
+function ignoreFile(filePath){
+  showModal(
+    '🚫 Add to .gitignore?',
+    '<b>'+escapeHtml(filePath)+'</b> will be added to <code>.gitignore</code>.<br><br>'
+    +'Git will stop tracking this file/directory. It will disappear from the change list.<br>'
+    +'<span style="font-size:12px;color:#6b7280">You can remove it from gitignore later via the 📋 Gitignore button.</span>',
+    'Ignore',
+    function(){
+      apiPost('/api/ignore',{path:filePath},function(data){
+        if(data.ok){addMsg('🚫 Ignored: '+filePath,'success');loadFiles();}
+        else addMsg('Ignore failed: '+(data.error||''),'error');
+      });
+    }
+  );
+}
+
+function loadIgnored(){
+  apiGet('/api/ignored-list',function(data){
+    var entries=data.entries||[];
+    var html='';
+    if(!entries.length){
+      html='<div style="color:#6b7280;padding:12px 0;text-align:center">No entries in .gitignore yet.</div>';
+    }else{
+      html='<div style="font-size:12px;color:#6b7280;margin-bottom:8px">'
+        +entries.length+' entries in <code>.gitignore</code></div>'
+        +'<div style="max-height:320px;overflow-y:auto">';
+      entries.forEach(function(e){
+        html+='<div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;background:#f9fafb;margin-bottom:4px">'
+          +'<span style="flex:1;font-family:monospace;font-size:13px;color:#374151">'+escapeHtml(e)+'</span>'
+          +'<button class="btn btn-sm" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer" '
+          +'onclick="unignoreEntry(\''+escapeAttr(e)+'\')">+ Re-add</button>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+    showModal('📋 .gitignore Entries', html, 'Close', null);
+  });
+}
+
+function unignoreEntry(entry){
+  apiPost('/api/unignore',{entry:entry},function(data){
+    if(data.ok){
+      addMsg('✅ Removed from .gitignore: '+entry,'success');
+      closeModal();
+      setTimeout(loadIgnored, 100);
+      loadFiles();
+    }else{
+      addMsg('Failed to remove: '+(data.error||''),'error');
+    }
   });
 }
 function loadCurrentBranch(){apiGet('/api/current-branch',function(data){
@@ -1323,6 +1369,9 @@ function doPush(credentials, force){
           if(r.ok){
             if(ld3) ld3.innerHTML+='<span style="color:#4ade80;font-weight:700">✅ Push succeeded!\n</span>';
             addMsg('✅ Push OK','success');
+            // Re-enable close button
+            var cbOk=document.querySelector('#modal-btns .btn-warning');
+            if(cbOk){cbOk.disabled=false;cbOk.style.opacity='';cbOk.textContent='Close';cbOk.onclick=closeModal;}
           } else if(r.authRequired){
             if(ld3) ld3.innerHTML+='<span style="color:#fbbf24;font-weight:600">\n⚠️ HTTPS authentication failed.\n</span>';
             // Replace modal buttons with action options
@@ -1359,12 +1408,53 @@ function doPush(credentials, force){
             btnsDiv.appendChild(sshBtn);
             return;
           } else {
+            var combinedLog=(r.lines||[]).join('\n');
+            var isRejectedFetchFirst=/rejected/.test(combinedLog)&&/fetch first/.test(combinedLog);
             if(ld3) ld3.innerHTML+='<span style="color:#f87171;font-weight:700">\n❌ Push failed!\n</span>';
             addMsg('❌ Push failed','error');
+            // Replace modal buttons with context-aware actions
+            var btnsDiv2=document.getElementById('modal-btns');
+            btnsDiv2.innerHTML='';
+            var clsBtn2=document.createElement('button');
+            clsBtn2.className='btn btn-secondary';clsBtn2.textContent='Close';clsBtn2.onclick=closeModal;
+            btnsDiv2.appendChild(clsBtn2);
+            if(isRejectedFetchFirst){
+              // Remote has new commits — offer Pull & Retry
+              if(ld3) ld3.innerHTML+='<span style="color:#fbbf24">💡 Remote has new commits. Pull first, then push.\n</span>';
+              var pullRetryBtn=document.createElement('button');
+              pullRetryBtn.className='btn btn-success';
+              pullRetryBtn.textContent='⬇️ Pull & Retry Push';
+              pullRetryBtn.onclick=function(){
+                pullRetryBtn.disabled=true;pullRetryBtn.textContent='Pulling...';
+                var ld4=document.getElementById(logDivId);
+                if(ld4) ld4.innerHTML+='<span style="color:#94a3b8">⏳ Pulling (rebase)...\n</span>';
+                apiPost('/api/pull',{mode:'rebase'},function(pd){
+                  if(pd.ok){
+                    if(ld4) ld4.innerHTML+='<span style="color:#4ade80">✅ Pull OK — retrying push...\n</span>';
+                    closeModal();
+                    setTimeout(function(){ doPush(credentials||undefined); },300);
+                  }else{
+                    if(ld4) ld4.innerHTML+='<span style="color:#f87171">❌ Pull failed: '+escapeHtml(pd.error||pd.log||'')+'</span>\n';
+                    pullRetryBtn.disabled=false;pullRetryBtn.textContent='⬇️ Pull & Retry Push';
+                  }
+                });
+              };
+              var forceBtn=document.createElement('button');
+              forceBtn.className='btn btn-warning';
+              forceBtn.textContent='⚠️ Force Push';
+              forceBtn.onclick=function(){
+                showModal('⚠️ Force Push Warning',
+                  '<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:8px;padding:12px 14px;margin-bottom:10px;color:#7f1d1d">'
+                  +'<b>Force push overwrites remote history!</b><br>Remote commits not in your local branch will be lost. Only do this if you are absolutely sure.</div>'
+                  +'Proceed with <b>git push --force-with-lease</b>?',
+                  'Force Push',
+                  function(){ closeModal(); setTimeout(function(){ doPushForce(); },300); }
+                );
+              };
+              btnsDiv2.appendChild(forceBtn);
+              btnsDiv2.appendChild(pullRetryBtn);
+            }
           }
-          // Re-enable close button
-          var cb=document.querySelector('#modal-btns .btn-warning');
-          if(cb){cb.disabled=false;cb.style.opacity='';cb.textContent='Close';cb.onclick=closeModal;}
         } else {
           setTimeout(poll,500);
         }
@@ -1374,6 +1464,10 @@ function doPush(credentials, force){
     }
     poll();
   });
+}
+
+function doPushForce(){
+  doPush(null, true);
 }
 
 function _showPushAuthModal(branch){
@@ -1553,7 +1647,7 @@ function _branchSortHeader(){
   return '<div style="display:flex;gap:16px;padding:6px 14px 4px;border-bottom:1px solid #e5e7eb;margin-bottom:4px;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px">'+
     '<span style="flex:1;cursor:pointer;user-select:none" onclick="toggleBranchSort(\'name\')" title="Sort by name">Name'+ni+'</span>'+
     '<span style="width:160px;cursor:pointer;user-select:none;text-align:right" onclick="toggleBranchSort(\'date\')" title="Sort by date">Last Commit'+di+'</span>'+
-    '<span style="width:90px"></span>'+
+    '<span style="width:196px"></span>'+
     '</div>';
 }
 
@@ -1577,11 +1671,16 @@ function loadBranches(page){
       html+='<span class="name">'+escapeHtml(b.name)+'</span>';
       html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
       if(isCur){
+        html+='<div style="width:196px;display:flex;justify-content:flex-end">';
         html+='<span style="display:inline-flex;align-items:center;justify-content:center;width:90px;padding:4px 0;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:.3px;'
           +'background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;'
           +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
+        html+='</div>';
       }else{
+        html+='<div style="width:196px;display:flex;gap:6px;justify-content:flex-end">';
+        html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
         html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+        html+='</div>';
       }
       html+='</div>';
     });
@@ -1590,7 +1689,10 @@ function loadBranches(page){
       html+='<div class="branch-item">';
       html+='<span class="name">'+escapeHtml(b.name)+'</span>';
       html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
-      html+='<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      html+='<div style="width:196px;display:flex;gap:6px;justify-content:flex-end">';
+      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
+      html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      html+='</div>';
       html+='</div>';
     });
     html+='</div>';
@@ -1680,6 +1782,68 @@ function doCheckout(branchName, hadStash){
       });
     }else addMsg(t('switch_fail')+(data.error||data.stderr||''),'error');
   });
+}
+
+// ═══════════ Merge ═══════════
+function mergeBranch(sourceBranch){
+  var curBranch=document.getElementById('branch-name').textContent.trim();
+  var defaultMsg='Merge branch \''+sourceBranch+'\' into '+curBranch;
+  var warnBox='<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:10px;padding:14px 16px;margin-bottom:14px">'
+    +'<div style="font-size:15px;font-weight:800;color:#b91c1c;margin-bottom:10px">⚠️ HIGH-RISK OPERATION — Read before continuing!</div>'
+    +'<div style="background:#fff3;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:13px;line-height:1.8">'
+    +'Merging: <span style="font-family:monospace;background:#fee2e2;color:#7c3aed;padding:1px 7px;border-radius:4px;font-weight:700">'+escapeHtml(sourceBranch)+'</span>'
+    +' &nbsp;→&nbsp; <span style="font-family:monospace;background:#dbeafe;color:#1d4ed8;padding:1px 7px;border-radius:4px;font-weight:700">'+escapeHtml(curBranch)+'</span> (current)'
+    +'</div>'
+    +'<ul style="margin:0 0 12px;padding-left:18px;font-size:13px;color:#7f1d1d;line-height:1.9">'
+    +'<li>All commits from <b>'+escapeHtml(sourceBranch)+'</b> will be <b>squashed into one single commit</b></li>'
+    +'<li>If conflicts arise, you must resolve them in the <b>Conflicts tab</b></li>'
+    +'<li>Ensure all local changes are <b>committed or stashed</b> first</li>'
+    +'<li>This modifies your branch history — coordinate with your team</li>'
+    +'</ul>'
+    +'</div>'
+    +'<label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Commit message <span style="color:#dc2626">*</span></label>'
+    +'<textarea id="merge-msg-input" rows="3" style="width:100%;padding:8px 10px;border:1.5px solid #d1d5db;border-radius:8px;font-size:13px;font-family:monospace;resize:vertical;outline:none;box-sizing:border-box" placeholder="Required — describe what this merge brings in">'+escapeHtml(defaultMsg)+'</textarea>';
+  showModal(
+    '🚨 Confirm Merge',
+    warnBox,
+    'Merge Now',
+    function(){
+      var msg=(document.getElementById('merge-msg-input')||{value:''}).value.trim();
+      if(!msg){addMsg('Merge commit message is required','error');return;}
+      addMsg('🔀 Merging '+sourceBranch+' → '+curBranch+'...','info');
+      apiPost('/api/merge',{branch:sourceBranch,message:msg},function(data){
+        var logBox='<div style="background:#0f172a;color:#e2e8f0;font-family:monospace;font-size:12px;'
+          +'line-height:1.6;padding:12px 14px;border-radius:8px;max-height:260px;overflow-y:auto;white-space:pre-wrap;margin-bottom:12px">'
+          +escapeHtml((data.log||'').trim())+'</div>';
+        if(data.ok){
+          addMsg('✅ Merged '+sourceBranch+' into '+curBranch,'success');
+          loadFiles();loadLog(1);checkConflicts();
+          showModalDouble(
+            '✅ Merge succeeded',
+            logBox+'<b>Push <code>'+escapeHtml(curBranch)+'</code> to remote now?</b>',
+            'Push Now',
+            function(){ doPush(); },
+            'Later (keep local)',
+            null,
+            'btn-success','btn-secondary'
+          );
+        }else if(data.hasConflict){
+          addMsg('⚠️ Merge conflicts detected in '+sourceBranch,'error');
+          checkConflicts();
+          showModal(
+            '⚠️ Merge Conflicts!',
+            logBox+'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;color:#b91c1c;font-weight:600">'
+            +'Conflicts detected — go to the <b>Conflicts tab</b> to resolve them before pushing.</div>',
+            'Go to Conflicts',
+            function(){ loadConflicts(); }
+          );
+        }else{
+          addMsg('❌ Merge failed: '+(data.error||''),'error');
+          showModal('❌ Merge Failed',logBox,'Close',null);
+        }
+      });
+    }
+  );
 }
 
 // ═══════════ Stash ═══════════
@@ -2032,7 +2196,10 @@ function _renderFilteredBranches(search){
         +'background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;'
         +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
     }else{
+      html+='<div style="display:flex;gap:6px;flex-shrink:0">';
+      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
       html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      html+='</div>';
     }
     html+='</div>';
   });
@@ -2657,6 +2824,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error":"Job not found"},404)
             else:
                 self._json(dict(job))
+        elif path=="/api/ignored-list":
+            import os as _os4
+            gitignore_path = _os4.path.join(_os4.getcwd(), '.gitignore')
+            try:
+                with open(gitignore_path,'r') as gf:
+                    entries=[l.strip() for l in gf.read().splitlines() if l.strip() and not l.strip().startswith('#')]
+            except FileNotFoundError:
+                entries=[]
+            self._json({"entries":entries})
         else:
             html_bytes=get_html_bytes()
             self.send_response(200)
@@ -2680,19 +2856,35 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok":True,"stdout":stdout} if rc==0 else {"ok":False,"error":stderr or "failed"},400)
 
         elif path=="/api/ignore":
-            fp=data.get("path","")
-            # 先检查是否被 git 跟踪
-            tracked_out,_,_ = _run(["git","ls-files","--",fp])
-            if tracked_out:
-                # 已跟踪：reset + checkout 恢复
-                _run(["git","reset","HEAD","--",fp])
-                stdout,stderr,rc = _run(["git","checkout","--",fp])
-            else:
-                # 未跟踪：直接删除文件
-                import os
-                try: os.remove(fp); rc=0; stdout="deleted"; stderr=""
-                except OSError as e: rc=1; stderr=str(e); stdout=""
-            self._json({"ok":True,"stdout":stdout} if rc==0 else {"ok":False,"error":stderr or "failed"},400)
+            import os as _os3
+            fp = data.get("path","").strip()
+            if not fp:
+                self._json({"ok":False,"error":"No path"},400); return
+            # Determine gitignore entry (append / for directories)
+            abs_fp = _os3.path.join(_os3.getcwd(), fp)
+            entry = fp.rstrip('/') + ('/' if (_os3.path.isdir(abs_fp) or fp.endswith('/')) else '')
+            gitignore_path = _os3.path.join(_os3.getcwd(), '.gitignore')
+            try:
+                with open(gitignore_path,'r') as gf: lines = gf.read().splitlines()
+            except FileNotFoundError:
+                lines = []
+            if entry not in lines:
+                lines.append(entry)
+                with open(gitignore_path,'w') as gf: gf.write('\n'.join(lines)+'\n')
+            # Remove from git index if currently tracked
+            _run(["git","rm","--cached","-r","--ignore-unmatch","--",fp])
+            self._json({"ok":True,"entry":entry})
+        elif path=="/api/unignore":
+            import os as _os5
+            entry = data.get("entry","").strip()
+            gitignore_path = _os5.path.join(_os5.getcwd(), '.gitignore')
+            try:
+                with open(gitignore_path,'r') as gf: lines = gf.read().splitlines()
+                lines = [l for l in lines if l.strip() != entry]
+                with open(gitignore_path,'w') as gf: gf.write('\n'.join(lines)+'\n')
+                self._json({"ok":True})
+            except Exception as e:
+                self._json({"ok":False,"error":str(e)},400)
 
         elif path=="/api/commit":
             msg=data.get("message",""); paths=data.get("paths",[])
@@ -2767,6 +2959,27 @@ class Handler(BaseHTTPRequestHandler):
                         except: pass
             threading.Thread(target=_job, daemon=True).start()
             self._json({"ok": True, "jobId": job_id})
+        elif path=="/api/merge":
+            source=data.get("branch","").strip()
+            message=data.get("message","").strip()
+            if not source:
+                self._json({"ok":False,"error":"No branch specified"},400)
+            elif not message:
+                self._json({"ok":False,"error":"Commit message is required"},400)
+            else:
+                # Squash merge: condenses all source commits into staged changes
+                out,err,rc=_run(["git","merge","--squash",source])
+                combined=(out+"\n"+err).strip()
+                has_conflict=rc!=0 and ("CONFLICT" in combined or "Automatic merge failed" in combined)
+                if rc==0:
+                    # Commit the squashed changes with the user's message
+                    cout,cerr,crc=_run(["git","commit","-m",message])
+                    combined=(combined+"\n"+cout+"\n"+cerr).strip()
+                    self._json({"ok":crc==0,"log":combined,"hasConflict":False,
+                                "error":cerr if crc!=0 else ""})
+                else:
+                    self._json({"ok":False,"log":combined,"hasConflict":has_conflict,
+                                "error":combined})
         elif path=="/api/switch-remote-ssh":
             import re
             remote_url, _, rc = _run(["git","remote","get-url","origin"])
