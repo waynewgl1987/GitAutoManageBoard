@@ -32,7 +32,7 @@ def _run(cmd, cwd=None, timeout=120, env=None):
     except Exception as e:
         return "", str(e), -1
 
-def _run_push_streaming(job_id, branch, extra_env=None, force=False):
+def _run_push_streaming(job_id, branch, extra_env=None, force=False, is_ssh=False):
     """Run git push in a background thread, streaming output lines into _PUSH_JOBS[job_id]."""
     import os as _os, subprocess as _subp, threading
     run_env = _os.environ.copy()
@@ -80,12 +80,14 @@ def _run_push_streaming(job_id, branch, extra_env=None, force=False):
             _append('--- Retrying with HEAD ref ---')
             rc = _try_push(push_base + ["origin", "HEAD"])
         combined = '\n'.join(job['lines'])
-        is_auth_err = any(x in combined.lower() for x in [
-            "authentication failed", "could not read username",
-            "invalid username", "403", "401", "permission denied"])
         job['done'] = True
         job['ok'] = (rc == 0)
-        job['authRequired'] = is_auth_err and rc != 0
+        # SSH remotes authenticate via key — never prompt for credentials
+        if not is_ssh:
+            is_auth_err = any(x in combined.lower() for x in [
+                "authentication failed", "could not read username",
+                "invalid username", "403", "401", "permission denied"])
+            job['authRequired'] = is_auth_err and rc != 0
         if rc != 0:
             job['error'] = combined
     except Exception as e:
@@ -501,7 +503,9 @@ input[type="checkbox"]{width:23px;height:23px;cursor:pointer;accent-color:#3b82f
 .branch-item{display:flex;align-items:center;gap:10px;padding:10px 20px;cursor:pointer;transition:background .15s}
 .branch-item:hover{background:#f3f4f6}
 .branch-item .name{flex:1;font-size:14px;font-weight:500}
-.branch-item.current .name{color:#3b82f6;font-weight:700}
+.branch-item.current{background:linear-gradient(90deg,#dbeafe 0%,#ede9fe 100%);border-left:4px solid #4f46e5;padding-left:16px}
+.branch-item.current:hover{background:linear-gradient(90deg,#bfdbfe 0%,#ddd6fe 100%)}
+.branch-item.current .name{color:#3730a3;font-weight:700}
 .stash-item{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid #f3f4f6;background:#fff}
 .stash-item .name{flex:1;font-size:14px}
 .modal-bg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}
@@ -895,6 +899,10 @@ var T = {
   push_ok: {en:'Push OK: ', zh:'推送成功: '},
   branch_created: {en:'Branch created: ', zh:'分支已创建: '},
   create_failed: {en:'Create failed: ', zh:'创建失败: '},
+  branch_push_title: {en:'🎉 Branch Created!', zh:'🎉 分支已创建！'},
+  branch_push_desc: {en:'Branch <b>{name}</b> was created locally.<br><br>Push it to remote now so others can see it?', zh:'分支 <b>{name}</b> 已在本地创建。<br><br>是否立即推送到远端，让团队成员可以看到？'},
+  branch_push_btn: {en:'Push to Remote', zh:'推送到远端'},
+  branch_push_later: {en:'Later', zh:'稍后推送'},
   enter_branch_name: {en:'Enter a branch name', zh:'请输入分支名'},
   confirm_commit_title: {en:'Confirm Commit', zh:'确认提交'},
   stashing_pulling: {en:'Stashing & pulling...', zh:'正在暂存并拉取...'},
@@ -1316,8 +1324,39 @@ function doPush(credentials, force){
             if(ld3) ld3.innerHTML+='<span style="color:#4ade80;font-weight:700">✅ Push succeeded!\n</span>';
             addMsg('✅ Push OK','success');
           } else if(r.authRequired){
-            closeModal();
-            _showPushAuthModal(branch);
+            if(ld3) ld3.innerHTML+='<span style="color:#fbbf24;font-weight:600">\n⚠️ HTTPS authentication failed.\n</span>';
+            // Replace modal buttons with action options
+            var btnsDiv=document.getElementById('modal-btns');
+            btnsDiv.innerHTML='';
+            var sshBtn=document.createElement('button');
+            sshBtn.className='btn btn-success';
+            sshBtn.textContent='🔑 Switch to SSH & Retry';
+            sshBtn.onclick=function(){
+              sshBtn.disabled=true; sshBtn.textContent='Switching...';
+              var ld4=document.getElementById(logDivId);
+              if(ld4) ld4.innerHTML+='<span style="color:#94a3b8">⏳ Switching remote to SSH...\n</span>';
+              apiPost('/api/switch-remote-ssh',{},function(d){
+                if(d.ok){
+                  if(ld4) ld4.innerHTML+='<span style="color:#4ade80">✅ Remote switched to: '+escapeHtml(d.newUrl)+'\n🔄 Retrying push...\n</span>';
+                  closeModal();
+                  setTimeout(function(){ doPush(); },300);
+                }else{
+                  if(ld4) ld4.innerHTML+='<span style="color:#f87171">❌ Switch failed: '+escapeHtml(d.error||'')+'</span>\n';
+                  sshBtn.disabled=false; sshBtn.textContent='🔑 Switch to SSH & Retry';
+                }
+              });
+            };
+            var credBtn=document.createElement('button');
+            credBtn.className='btn btn-primary';
+            credBtn.textContent='🔐 Enter Credentials';
+            credBtn.onclick=function(){ closeModal(); _showPushAuthModal(branch); };
+            var clsBtn=document.createElement('button');
+            clsBtn.className='btn btn-secondary';
+            clsBtn.textContent='Close';
+            clsBtn.onclick=closeModal;
+            btnsDiv.appendChild(clsBtn);
+            btnsDiv.appendChild(credBtn);
+            btnsDiv.appendChild(sshBtn);
             return;
           } else {
             if(ld3) ld3.innerHTML+='<span style="color:#f87171;font-weight:700">\n❌ Push failed!\n</span>';
@@ -1535,9 +1574,15 @@ function loadBranches(page){
       var isCur=(b.name===data.current);
       var cls=isCur?' branch-item current':' branch-item';
       html+='<div class="'+cls+'">';
-      html+='<span class="name">'+escapeHtml(b.name)+(isCur?' (current)':'')+'</span>';
+      html+='<span class="name">'+escapeHtml(b.name)+'</span>';
       html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
-      if(!isCur)html+='<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      if(isCur){
+        html+='<span style="display:inline-flex;align-items:center;justify-content:center;width:90px;padding:4px 0;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:.3px;'
+          +'background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;'
+          +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
+      }else{
+        html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      }
       html+='</div>';
     });
     html+='</div><div class="branch-list"><h3>Remote Branches ('+data.total_remote+')</h3>';
@@ -1565,7 +1610,19 @@ function createNewBranch(){
   var curName=document.getElementById('branch-name').textContent;
   showModal('Create Branch','Create new branch <b>'+escapeHtml(name)+'</b><br><br>Based on: <span style="background:#1e40af;color:#fff;padding:2px 10px;border-radius:99px;font-weight:700">'+escapeHtml(curName)+'</span>','Create',function(){
     apiPost('/api/create-branch',{name:name},function(data){
-      if(data.ok){addMsg(t('branch_created')+name,'success');document.getElementById('new-branch-name').value='';loadBranches();loadCurrentBranch();}
+      if(data.ok){
+        document.getElementById('new-branch-name').value='';loadBranches();loadCurrentBranch();
+        showModalDouble(
+          t('branch_push_title'),
+          tf('branch_push_desc',L,{name:name}),
+          t('branch_push_btn'),
+          function(){ doPush(); },
+          t('branch_push_later'),
+          null,
+          'btn-success',
+          'btn-secondary'
+        );
+      }
       else addMsg(t('create_failed')+(data.error||''),'error');
     });
   });
@@ -1575,21 +1632,51 @@ function checkoutBranch(branchName){
   apiGet('/api/has-uncommitted',function(data){
     if(data.hasChanges){
       showModal(t('stash_switched'),t('stash_prompt')+branchName+'?',t('stash_switched'),function(){
-        apiPost('/api/stash',{},function(){doCheckout(branchName)});
+        apiPost('/api/stash',{},function(stashData){
+          doCheckout(branchName, true);  // true = had stash
+        });
       });
-    }else doCheckout(branchName);
+    }else doCheckout(branchName, false);
   });
 }
 
-function doCheckout(branchName){
+function doCheckout(branchName, hadStash){
   apiPost('/api/checkout',{branch:branchName},function(data){
     if(data.ok){
       apiGet('/api/current-branch',function(bd){
         var branch = bd.branch;
         document.getElementById('branch-name').textContent = branch;
-        addMsg(t('switch_to_branch') + branch, 'success');
-        showToast(t('switch_to_branch') + branch, 'ok', 2000);
-        setTimeout(function(){ window.location.reload(); }, 1500);
+        if(hadStash){
+          // Ask user whether to apply stashed changes to new branch
+          showModalDouble(
+            '📦 Stash detected',
+            'Your uncommitted changes were stashed before switching.<br><br>'
+            +'<b>Apply stash to <code>'+escapeHtml(branch)+'</code> now?</b><br>'
+            +'<span style="font-size:12px;color:#6b7280">If conflicts occur you can resolve them manually.</span>',
+            'Apply Stash',
+            function(){
+              apiPost('/api/stash-pop',{index:0},function(r){
+                if(r.ok){
+                  addMsg('✅ Switched to '+branch+' and applied stash','success');
+                }else{
+                  addMsg('⚠️ Switched to '+branch+' but stash apply failed: '+(r.error||''),'error');
+                  addMsg('💡 Your changes are safe in stash[0]. Go to Stash tab to apply manually.','info');
+                }
+                setTimeout(function(){ window.location.reload(); }, 800);
+              });
+            },
+            'Keep in Stash',
+            function(){
+              addMsg('✅ Switched to '+branch+'. Changes saved in stash[0] — apply from Stash tab when ready.','info');
+              setTimeout(function(){ window.location.reload(); }, 800);
+            },
+            'btn-success','btn-secondary'
+          );
+        }else{
+          addMsg(t('switch_to_branch') + branch, 'success');
+          showToast(t('switch_to_branch') + branch, 'ok', 2000);
+          setTimeout(function(){ window.location.reload(); }, 1500);
+        }
       });
     }else addMsg(t('switch_fail')+(data.error||data.stderr||''),'error');
   });
@@ -1938,9 +2025,15 @@ function _renderFilteredBranches(search){
     var cls=isCur?' branch-item current':' branch-item';
     html+='<div class="'+cls+'">';
     html+='<span style="font-size:11px;padding:1px 6px;border-radius:99px;margin-right:6px;background:'+(b.type==='local'?'#dbeafe':'#e0f2fe')+';color:'+(b.type==='local'?'#1e40af':'#0369a1')+'">'+b.type+'</span>';
-    html+='<span class="name">'+_highlightBranchMatch(escapeHtml(b.name),search)+(isCur?' (current)':'')+'</span>';
+    html+='<span class="name">'+_highlightBranchMatch(escapeHtml(b.name),search)+'</span>';
     html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
-    if(!isCur)html+='<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+    if(isCur){
+      html+='<span style="display:inline-flex;align-items:center;justify-content:center;width:90px;padding:4px 0;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:.3px;'
+        +'background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;'
+        +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
+    }else{
+      html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+    }
     html+='</div>';
   });
   html+='</div>';
@@ -2652,6 +2745,9 @@ class Handler(BaseHTTPRequestHandler):
             username = data.get("username","").strip()
             password = data.get("password","").strip()
             force = bool(data.get("force", False))
+            # Detect SSH remote — no credential prompt needed
+            remote_url, _, _ = _run(["git","remote","get-url","origin"])
+            is_ssh = remote_url.startswith("git@") or remote_url.startswith("ssh://")
             job_id = str(uuid.uuid4())[:8]
             _PUSH_JOBS[job_id] = {'lines': [], 'done': False, 'ok': False, 'error': '', 'authRequired': False}
             extra_env = None
@@ -2664,13 +2760,30 @@ class Handler(BaseHTTPRequestHandler):
                 extra_env = {"GIT_ASKPASS": tmp_file, "GIT_TERMINAL_PROMPT": "0"}
             def _job():
                 try:
-                    _run_push_streaming(job_id, branch, extra_env, force=force)
+                    _run_push_streaming(job_id, branch, extra_env, force=force, is_ssh=is_ssh)
                 finally:
                     if tmp_file:
                         try: _os2.unlink(tmp_file)
                         except: pass
             threading.Thread(target=_job, daemon=True).start()
             self._json({"ok": True, "jobId": job_id})
+        elif path=="/api/switch-remote-ssh":
+            import re
+            remote_url, _, rc = _run(["git","remote","get-url","origin"])
+            if rc != 0:
+                self._json({"ok":False,"error":"Cannot get remote URL"},400)
+            else:
+                url = remote_url.strip()
+                # https://github.com/user/repo.git → git@github.com:user/repo.git
+                new_url = re.sub(r'^https://([^/]+)/(.+)$', r'git@\1:\2', url)
+                if new_url == url:
+                    self._json({"ok":False,"error":"Remote is already SSH or unsupported format"})
+                else:
+                    _, err, rc2 = _run(["git","remote","set-url","origin",new_url])
+                    if rc2 == 0:
+                        self._json({"ok":True,"newUrl":new_url})
+                    else:
+                        self._json({"ok":False,"error":err},400)
         elif path=="/api/reset-file":
             fp=data.get("file",""); commit=data.get("commit","")
             stdout,stderr,rc=_run(["git","checkout",commit,"--",fp])
