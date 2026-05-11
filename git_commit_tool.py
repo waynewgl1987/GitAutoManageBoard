@@ -895,6 +895,10 @@ var T = {
   push_ok: {en:'Push OK: ', zh:'推送成功: '},
   branch_created: {en:'Branch created: ', zh:'分支已创建: '},
   create_failed: {en:'Create failed: ', zh:'创建失败: '},
+  branch_push_title: {en:'🎉 Branch Created!', zh:'🎉 分支已创建！'},
+  branch_push_desc: {en:'Branch <b>{name}</b> was created locally.<br><br>Push it to remote now so others can see it?', zh:'分支 <b>{name}</b> 已在本地创建。<br><br>是否立即推送到远端，让团队成员可以看到？'},
+  branch_push_btn: {en:'Push to Remote', zh:'推送到远端'},
+  branch_push_later: {en:'Later', zh:'稍后推送'},
   enter_branch_name: {en:'Enter a branch name', zh:'请输入分支名'},
   confirm_commit_title: {en:'Confirm Commit', zh:'确认提交'},
   stashing_pulling: {en:'Stashing & pulling...', zh:'正在暂存并拉取...'},
@@ -1565,7 +1569,19 @@ function createNewBranch(){
   var curName=document.getElementById('branch-name').textContent;
   showModal('Create Branch','Create new branch <b>'+escapeHtml(name)+'</b><br><br>Based on: <span style="background:#1e40af;color:#fff;padding:2px 10px;border-radius:99px;font-weight:700">'+escapeHtml(curName)+'</span>','Create',function(){
     apiPost('/api/create-branch',{name:name},function(data){
-      if(data.ok){addMsg(t('branch_created')+name,'success');document.getElementById('new-branch-name').value='';loadBranches();loadCurrentBranch();}
+      if(data.ok){
+        document.getElementById('new-branch-name').value='';loadBranches();loadCurrentBranch();
+        showModalDouble(
+          t('branch_push_title'),
+          tf('branch_push_desc',L,{name:name}),
+          t('branch_push_btn'),
+          function(){ doPush(); },
+          t('branch_push_later'),
+          null,
+          'btn-success',
+          'btn-secondary'
+        );
+      }
       else addMsg(t('create_failed')+(data.error||''),'error');
     });
   });
