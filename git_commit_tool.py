@@ -24,9 +24,11 @@ def _run(cmd, cwd=None, timeout=120, env=None):
     if env:
         run_env.update(env)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
+        r = subprocess.run(cmd, capture_output=True,
                            cwd=cwd or _os.getcwd(), timeout=timeout, env=run_env)
-        return r.stdout.strip(), r.stderr.strip(), r.returncode
+        stdout = r.stdout.decode("utf-8", errors="replace").strip()
+        stderr = r.stderr.decode("utf-8", errors="replace").strip()
+        return stdout, stderr, r.returncode
     except subprocess.TimeoutExpired:
         return "", f"git command timed out after {timeout}s: {' '.join(cmd)}", -1
     except Exception as e:
@@ -34,7 +36,7 @@ def _run(cmd, cwd=None, timeout=120, env=None):
 
 def _run_push_streaming(job_id, branch, extra_env=None, force=False, is_ssh=False):
     """Run git push in a background thread, streaming output lines into _PUSH_JOBS[job_id]."""
-    import os as _os, subprocess as _subp, threading
+    import os as _os, subprocess as _subp, threading, time as _time
     run_env = _os.environ.copy()
     run_env["GIT_TERMINAL_PROMPT"] = "0"
     run_env["GIT_ASKPASS"] = "echo"
@@ -42,7 +44,14 @@ def _run_push_streaming(job_id, branch, extra_env=None, force=False, is_ssh=Fals
         run_env.update(extra_env)
     job = _PUSH_JOBS[job_id]
 
-    def _append(line):
+    def _append(line, prefix=''):
+        line = (line or '').rstrip('\r\n')
+        if line:
+            ts = _time.strftime('%H:%M:%S')
+            job['lines'].append(f'[{ts}] {prefix}{line}' if prefix else f'[{ts}] {line}')
+
+    def _append_raw(line):
+        """Append without timestamp (for blank spacers / separators)."""
         line = (line or '').rstrip('\r\n')
         if line:
             job['lines'].append(line)
@@ -51,38 +60,78 @@ def _run_push_streaming(job_id, branch, extra_env=None, force=False, is_ssh=Fals
     if force:
         push_base.append("--force-with-lease")
 
-    def _try_push(cmd):
-        _append('$ ' + ' '.join(cmd))
+    # Get remote URL for display
+    try:
+        url_out, _, _ = _run(["git", "remote", "get-url", "origin"])
+        remote_url = url_out.strip()
+    except Exception:
+        remote_url = "origin"
+
+    def _try_push(cmd, timeout=120):
+        _append_raw('$ ' + ' '.join(cmd))
         try:
             proc = _subp.Popen(cmd, stdout=_subp.PIPE, stderr=_subp.PIPE,
                                text=True, cwd=_os.getcwd(), env=run_env)
         except Exception as e:
             _append('ERROR: ' + str(e))
-            return -1
+            return -1, False  # (rc, timed_out)
+
+        last_output = [_time.time()]
         def rd(stream):
             for l in stream:
-                _append(l)
+                l = l.rstrip('\r\n')
+                if l:
+                    _append(l)
+                    last_output[0] = _time.time()
+
         t1 = threading.Thread(target=rd, args=(proc.stdout,), daemon=True)
         t2 = threading.Thread(target=rd, args=(proc.stderr,), daemon=True)
         t1.start(); t2.start()
-        try:
-            proc.wait(timeout=120)
-        except _subp.TimeoutExpired:
-            proc.kill()
-            _append('ERROR: git push timed out after 120s')
-            return -1
+
+        # Wait with heartbeat every 10s if no output
+        deadline = _time.time() + timeout
+        while True:
+            try:
+                proc.wait(timeout=10)
+                break  # process finished
+            except _subp.TimeoutExpired:
+                elapsed = int(_time.time() - last_output[0])
+                remaining = int(deadline - _time.time())
+                if remaining <= 0:
+                    proc.kill()
+                    _append(f'⏱ Push timed out after {timeout}s — no response from server. Check your network.')
+                    t1.join(); t2.join()
+                    return -1, True  # timed out
+                if elapsed >= 10:
+                    _append(f'⏳ Still waiting... ({int(_time.time() - last_output[0])}s since last output, {remaining}s until timeout)')
+
         t1.join(); t2.join()
-        return proc.returncode
+        return proc.returncode, False
 
     try:
-        rc = _try_push(push_base + ["origin", branch])
-        if rc != 0:
-            _append('--- Retrying with HEAD ref ---')
-            rc = _try_push(push_base + ["origin", "HEAD"])
+        _append_raw('─' * 52)
+        _append(f'📦 Repo  : {remote_url}')
+        _append(f'🌿 Branch: {branch}')
+        _append(f'{"⚠️  Force push (--force-with-lease)" if force else "🚀 Normal push"}')
+        _append_raw('─' * 52)
+
+        rc, timed_out = _try_push(push_base + ["origin", branch])
+
+        if rc != 0 and not timed_out:
+            combined_so_far = '\n'.join(job['lines'])
+            no_upstream = any(x in combined_so_far.lower() for x in [
+                "no upstream", "has no upstream", "set-upstream", "set the upstream"])
+            if no_upstream:
+                _append_raw('')
+                _append(f'ℹ️  Branch has no upstream tracking. Retrying with: git push origin HEAD:{branch}')
+                _append('   (This sets the remote branch to the same name — only affects branch "{}")'.format(branch))
+                _append_raw('')
+                rc, timed_out = _try_push(push_base + ["origin", f"HEAD:{branch}"])
+            # else: don't auto-retry, preserve the real error
+
         combined = '\n'.join(job['lines'])
         job['done'] = True
         job['ok'] = (rc == 0)
-        # SSH remotes authenticate via key — never prompt for credentials
         if not is_ssh:
             is_auth_err = any(x in combined.lower() for x in [
                 "authentication failed", "could not read username",
@@ -100,10 +149,50 @@ def current_branch():
     return out if rc==0 else "unknown"
 
 def display_branch():
-    return current_branch().lower()
+    return current_branch()
+
+def _ref_exists(name):
+    _, _, rc = _run(["git", "rev-parse", "--verify", name])
+    return rc == 0
+
+def _strip_origin_prefix(name):
+    return name[len("origin/"):] if name.startswith("origin/") else name
+
+def _resolve_ref(name):
+    """Resolve a branch name to a valid git ref. Tries as-is, then with origin/ prefix."""
+    if _ref_exists(name):
+        return name
+    if _ref_exists(f"origin/{name}"):
+        return f"origin/{name}"
+    return name
+
+def _resolve_ref_for_compare(name, source="auto"):
+    """Resolve compare refs while respecting whether the user picked Local or Remote."""
+    source = (source or "auto").strip().lower()
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+
+    if source == "remote":
+        remote = raw if raw.startswith("origin/") else f"origin/{raw}"
+        return remote if _ref_exists(remote) else remote
+
+    if source == "local":
+        local = _strip_origin_prefix(raw)
+        return local if _ref_exists(local) else local
+
+    if _ref_exists(raw):
+        return raw
+    origin = raw if raw.startswith("origin/") else f"origin/{raw}"
+    if _ref_exists(origin):
+        return origin
+    local = _strip_origin_prefix(raw)
+    if local != raw and _ref_exists(local):
+        return local
+    return raw  # let git report a proper error
 
 def get_branches(page=1, per_page=20):
-    cur = current_branch().lower()
+    cur = current_branch()
     branches = {"current":cur,"local":[],"remote":[]}
     # Use for-each-ref to get name + committer date + unix timestamp
     fmt = "%(refname:short)||%(committerdate:format:%Y-%m-%d %H:%M)||%(committerdate:unix)"
@@ -113,14 +202,14 @@ def get_branches(page=1, per_page=20):
         parts = l.strip().split("||",2)
         if len(parts)==3 and parts[0]:
             ts = int(parts[2]) if parts[2].strip().isdigit() else 0
-            local_list.append({"name":parts[0].lower(),"date":parts[1],"ts":ts})
+            local_list.append({"name":parts[0],"date":parts[1],"ts":ts})
     out,_,_ = _run(["git","for-each-ref","--format="+fmt,"refs/remotes"])
     all_remote = []
     for l in out.splitlines():
         parts = l.strip().split("||",2)
         if len(parts)==3 and parts[0] and "HEAD" not in parts[0]:
             ts = int(parts[2]) if parts[2].strip().isdigit() else 0
-            all_remote.append({"name":parts[0].lower(),"date":parts[1],"ts":ts})
+            all_remote.append({"name":parts[0],"date":parts[1],"ts":ts})
     branches["local"] = local_list
     total_remote = len(all_remote)
     total_local = len(local_list)
@@ -192,7 +281,15 @@ def file_commit_diff(commit_hash, file_path):
     return out
 
 def checkout_branch(name):
-    return _run(["git","checkout",name])
+    branch = (name or "").strip()
+    if not branch:
+        return "", "No branch specified", -1
+    if branch.startswith("origin/"):
+        local_branch = _strip_origin_prefix(branch)
+        if _ref_exists(local_branch):
+            return _run(["git", "checkout", local_branch])
+        return _run(["git", "checkout", "-b", local_branch, "--track", branch])
+    return _run(["git","checkout",branch])
 
 def create_branch(name, base=None):
     """创建新分支，可选基于 base 分支"""
@@ -306,70 +403,68 @@ def get_uncommitted_changes():
 def get_commit_log(page=1, per_page=10, search="", order="desc"):
     branch = current_branch()
     skip = (page-1)*per_page if per_page > 0 else 0
-    # %ct = unix timestamp (for reliable Python-side sorting), %ad = human-readable display date
-    fmt = "--pretty=format:%ct||%H||%an||%ad||%s"
+    fmt = "--pretty=format:%H||%an||%ad||%s"
     date_fmt = "--date=format:%Y-%m-%d %H:%M"
+    order_flag = "--date-order" if order == "desc" else "--reverse"
 
-    # Collect root commit hashes (commits with no parents) for frontend UI hints
-    root_out,_,_ = _run(["git","rev-list","--max-parents=0","--all"])
+    # Collect root commit hashes for frontend UI hints (cheap — only direct roots)
+    root_out,_,_ = _run(["git","rev-list","--max-parents=0","HEAD"])
     root_hashes = set(h.strip() for h in root_out.splitlines() if h.strip())
 
-    def _sort_and_parse(lines, ord_):
-        # Sort strictly by unix timestamp; git topo-order is unreliable across merges
-        def _ts(line):
-            try: return int(line.split("||",1)[0])
-            except: return 0
-        lines.sort(key=_ts, reverse=(ord_=="desc"))
+    def _parse(lines):
         result = []
         for line in lines:
-            parts = line.split("||",4)
-            if len(parts)==5:
-                h = parts[1]
-                result.append({"hash":h,"short_hash":h[:7],
-                                "author":parts[2],"date":parts[3],"message":parts[4],
+            line = line.strip()
+            if not line: continue
+            parts = line.split("||", 3)
+            if len(parts) == 4:
+                h = parts[0]
+                result.append({"hash": h, "short_hash": h[:7],
+                                "author": parts[1], "date": parts[2], "message": parts[3],
                                 "is_root": h in root_hashes})
         return result
 
     if not search:
-        # Fetch all commits (no -n limit) so Python can sort reliably
-        out,_,_ = _run(["git","log",branch,date_fmt,fmt])
-        all_lines = [l.strip() for l in out.splitlines() if l.strip()]
-        total = len(all_lines)
-        sorted_commits = _sort_and_parse(all_lines, order)
-        page_commits = sorted_commits[skip:skip+per_page] if per_page > 0 else sorted_commits
-        return {"commits":page_commits,"total":total,"page":page,"per_page":per_page,"order":order}
+        # Use git native --skip + -n for fast pagination — never loads all commits
+        rev_order = [] if order == "desc" else ["--reverse"]
+        count_out,_,_ = _run(["git","rev-list","--count", branch])
+        total = int(count_out.strip()) if count_out.strip().isdigit() else 0
+        out,_,_ = _run(["git","log", branch, date_fmt, fmt,
+                         "--skip", str(skip), "-n", str(per_page)] + rev_order)
+        commits = _parse(out.splitlines())
+        return {"commits": commits, "total": total, "page": page, "per_page": per_page, "order": order}
 
-    # 搜索模式：合并 message / author / hash 三个来源
-    base_args = ["git","log",branch,date_fmt,fmt,"-n","500"]
+    # Search mode: use git --grep / --author with a reasonable cap
+    base_args = ["git", "log", branch, date_fmt, fmt, "-n", "500"]
     hash_set = set()
     all_lines = []
 
-    # 1) 搜索 commit message
-    out_m,_,_ = _run(base_args + [f"--grep={search}","-i","-E"])
+    # 1) Search commit message
+    out_m,_,_ = _run(base_args + [f"--grep={search}", "-i", "-E"])
     for l in out_m.splitlines():
         l = l.strip()
         if l:
-            h = l.split("||",2)[1] if l.count("||")>=1 else ""
+            h = l.split("||", 1)[0]
             if h and h not in hash_set:
                 hash_set.add(h); all_lines.append(l)
 
-    # 2) 搜索 author
+    # 2) Search author
     out_a,_,_ = _run(base_args + [f"--author={search}"])
     for l in out_a.splitlines():
         l = l.strip()
         if l:
-            h = l.split("||",2)[1] if l.count("||")>=1 else ""
+            h = l.split("||", 1)[0]
             if h and h not in hash_set:
                 hash_set.add(h); all_lines.append(l)
 
-    # 3) 搜索 hash（纯十六进制）
+    # 3) Search by hash prefix
     if all(c in "0123456789abcdefABCDEF" for c in search):
         out_rev,_,_ = _run(["git","rev-list","--all","--max-count","50"])
         for rev in out_rev.splitlines():
             rev = rev.strip()
             if rev and (search.lower() in rev.lower()) and rev not in hash_set:
                 out_show,_,_ = _run(["git","show","--no-patch",
-                    "--pretty=format:%ct||%H||%an||%ad||%s",
+                    "--pretty=format:%H||%an||%ad||%s",
                     "--date=format:%Y-%m-%d %H:%M", rev])
                 for l in out_show.splitlines():
                     l = l.strip()
@@ -377,9 +472,11 @@ def get_commit_log(page=1, per_page=10, search="", order="desc"):
                         hash_set.add(rev); all_lines.append(l)
 
     total = len(all_lines)
-    sorted_commits = _sort_and_parse(all_lines, order)
-    page_commits = sorted_commits[skip:skip+per_page] if per_page > 0 else sorted_commits
-    return {"commits":page_commits,"total":total,"page":page,"per_page":per_page,"order":order}
+    # Sort search results by date (embedded in field 2)
+    all_lines.sort(reverse=(order == "desc"))
+    commits = _parse(all_lines)
+    page_commits = commits[skip:skip+per_page] if per_page > 0 else commits
+    return {"commits": page_commits, "total": total, "page": page, "per_page": per_page, "order": order}
 
 def reset_to(hash,mode="soft"):
     return _run(["git","reset",f"--{mode}",hash])
@@ -506,6 +603,27 @@ input[type="checkbox"]{width:23px;height:23px;cursor:pointer;accent-color:#3b82f
 .branch-item.current{background:linear-gradient(90deg,#dbeafe 0%,#ede9fe 100%);border-left:4px solid #4f46e5;padding-left:16px}
 .branch-item.current:hover{background:linear-gradient(90deg,#bfdbfe 0%,#ddd6fe 100%)}
 .branch-item.current .name{color:#3730a3;font-weight:700}
+/* Compare page */
+.compare-bar{display:flex;align-items:flex-start;gap:10px;background:#fff;padding:14px 16px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px;flex-wrap:wrap}
+.compare-row{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;flex-wrap:wrap}
+.compare-label{font-size:11px;color:#6b7280;font-weight:700;letter-spacing:.5px;min-width:72px;text-align:left}
+.compare-source-toggle{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.compare-actions{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;flex-wrap:wrap}
+.compare-bar select{flex:1 1 320px;padding:7px 12px;border-radius:8px;border:1.5px solid #d1d5db;font-size:13px;font-weight:600;min-width:220px;outline:none;cursor:pointer}
+.compare-bar select:focus{border-color:#6366f1}
+.compare-legend{display:flex;gap:10px;font-size:12px;align-items:center;justify-content:flex-start;flex-wrap:wrap}
+.compare-content{display:flex;gap:12px;align-items:flex-start}
+.compare-arrow{font-size:18px;color:#6366f1;font-weight:700;padding:0 4px}
+.compare-file-list{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px;overflow:hidden}
+.compare-file-item{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid #f3f4f6;cursor:pointer;transition:background .15s;font-size:13px}
+.compare-file-item:hover{background:#f3f4f6}
+.compare-file-item:last-child{border-bottom:none}
+.compare-stat-add{color:#16a34a;font-weight:700;font-size:12px;min-width:38px;text-align:right}
+.compare-stat-del{color:#dc2626;font-weight:700;font-size:12px;min-width:38px}
+.compare-diff-section{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:12px;overflow:hidden}
+.compare-diff-header{display:flex;align-items:center;gap:10px;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;cursor:pointer;font-size:13px;font-weight:600;color:#374151}
+.compare-diff-header:hover{background:#f1f5f9}
+.compare-diff-body{overflow-x:auto}
 .stash-item{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid #f3f4f6;background:#fff}
 .stash-item .name{flex:1;font-size:14px}
 .modal-bg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center}
@@ -707,6 +825,45 @@ mark{background:#fef3c7;border-radius:2px;padding:0 1px}
   </div>
   <div id="branches-content"></div>
   <div class="pagination" id="branches-pagination"></div>
+</div>
+
+<!-- ═══════════ Compare Page ═══════════ -->
+<div class="page" id="page-compare">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+    <button class="btn btn-secondary btn-back" onclick="loadBranches(1)">← Branches</button>
+    <h2 style="margin:0">⚖️ Branch Compare</h2>
+    <div id="compare-merge-btn-wrap" style="margin-left:auto"></div>
+  </div>
+  <div class="compare-bar" style="flex-direction:column;gap:10px">
+    <div class="compare-row">
+      <label class="compare-label">BRANCH A</label>
+      <div class="compare-source-toggle">
+        <button id="cmp-base-remote" class="btn btn-sm btn-primary" onclick="setCmpSelSource('base','remote')" style="padding:2px 10px;font-size:11px">🌐 Remote</button>
+        <button id="cmp-base-local" class="btn btn-sm btn-secondary" onclick="setCmpSelSource('base','local')" style="padding:2px 10px;font-size:11px">💻 Local</button>
+      </div>
+      <select id="compare-base-sel" onchange="runCompare()"></select>
+    </div>
+    <div class="compare-row">
+      <label class="compare-label">BRANCH B</label>
+      <div class="compare-source-toggle">
+        <button id="cmp-head-remote" class="btn btn-sm btn-primary" onclick="setCmpSelSource('head','remote')" style="padding:2px 10px;font-size:11px">🌐 Remote</button>
+        <button id="cmp-head-local" class="btn btn-sm btn-secondary" onclick="setCmpSelSource('head','local')" style="padding:2px 10px;font-size:11px">💻 Local</button>
+      </div>
+      <select id="compare-head-sel" onchange="runCompare()"></select>
+    </div>
+    <div class="compare-actions">
+      <button class="btn btn-secondary btn-sm" onclick="swapCompare()" title="Swap A ⇄ B">⇄ Swap</button>
+      <div id="compare-legend" class="compare-legend">
+        <span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-weight:600">+ A added</span>
+        <span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:4px;font-weight:600">− A removed</span>
+      </div>
+    </div>
+  </div>
+  <div id="compare-summary" style="margin-bottom:10px"></div>
+  <div class="compare-content">
+    <div id="compare-file-sidebar" style="width:240px;flex-shrink:0;background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden;position:sticky;top:12px;max-height:75vh;overflow-y:auto"></div>
+    <div id="compare-diff-area" style="flex:1;min-width:0"></div>
+  </div>
 </div>
 
 <!-- ═══════════ Restore File Page ═══════════ -->
@@ -1173,6 +1330,8 @@ function switchPage(name) {
   var activeTab=document.getElementById(tabId);
   if(activeTab)activeTab.classList.add('active');
   if(name==='main')loadFiles();
+  // Persist tab so refresh restores same page
+  try{localStorage.setItem('git_tool_active_tab',name);}catch(e){}
 }
 
 function apiGet(path,cb){
@@ -1355,10 +1514,15 @@ function doPush(credentials, force){
             var line=r.lines[i];
             // Colour certain lines
             var col='#e2e8f0';
-            if(/^error:|fatal:|ERROR/i.test(line)) col='#f87171';
-            else if(/^remote:|^To /i.test(line)) col='#67e8f9';
-            else if(/^\$/.test(line)) col='#fbbf24';
-            else if(/writing objects|compressing|counting/i.test(line)) col='#a5f3fc';
+            var lineBody=line.replace(/^\[\d{2}:\d{2}:\d{2}\] /,''); // strip timestamp for matching
+            if(/^─+$/.test(line)) col='#334155';
+            else if(/^error:|fatal:|ERROR|timed out/i.test(lineBody)) col='#f87171';
+            else if(/^remote:|^To /i.test(lineBody)) col='#67e8f9';
+            else if(/^\$/.test(lineBody)) col='#fbbf24';
+            else if(/writing objects|compressing|counting|enumerating/i.test(lineBody)) col='#a5f3fc';
+            else if(/Still waiting|⏳/.test(lineBody)) col='#94a3b8';
+            else if(/^📦|^🌿|^🚀|^⚠️|^ℹ️/.test(lineBody)) col='#c4b5fd';
+            else if(/^\[/.test(line)) col='#94a3b8'; // timestamp prefix dimmed
             ld2.innerHTML+='<span style="color:'+col+'">'+escapeHtml(line)+'</span>\n';
           }
           seenLines=r.lines.length;
@@ -1369,6 +1533,8 @@ function doPush(credentials, force){
           if(r.ok){
             if(ld3) ld3.innerHTML+='<span style="color:#4ade80;font-weight:700">✅ Push succeeded!\n</span>';
             addMsg('✅ Push OK','success');
+            // Reload log and branch so commit history reflects force-push/rewrite
+            loadLog(1); loadCurrentBranch();
             // Re-enable close button
             var cbOk=document.querySelector('#modal-btns .btn-warning');
             if(cbOk){cbOk.disabled=false;cbOk.style.opacity='';cbOk.textContent='Close';cbOk.onclick=closeModal;}
@@ -1410,6 +1576,8 @@ function doPush(credentials, force){
           } else {
             var combinedLog=(r.lines||[]).join('\n');
             var isRejectedFetchFirst=/rejected/.test(combinedLog)&&/fetch first/.test(combinedLog);
+            var isNonFastForward=/rejected/.test(combinedLog)&&/non-fast-forward/.test(combinedLog);
+            var isAnyRejected=isRejectedFetchFirst||isNonFastForward;
             if(ld3) ld3.innerHTML+='<span style="color:#f87171;font-weight:700">\n❌ Push failed!\n</span>';
             addMsg('❌ Push failed','error');
             // Replace modal buttons with context-aware actions
@@ -1418,9 +1586,12 @@ function doPush(credentials, force){
             var clsBtn2=document.createElement('button');
             clsBtn2.className='btn btn-secondary';clsBtn2.textContent='Close';clsBtn2.onclick=closeModal;
             btnsDiv2.appendChild(clsBtn2);
-            if(isRejectedFetchFirst){
-              // Remote has new commits — offer Pull & Retry
-              if(ld3) ld3.innerHTML+='<span style="color:#fbbf24">💡 Remote has new commits. Pull first, then push.\n</span>';
+            if(isAnyRejected){
+              if(isNonFastForward&&!isRejectedFetchFirst){
+                if(ld3) ld3.innerHTML+='<span style="color:#fbbf24">💡 Local branch is behind remote (e.g. after git reset --hard).\n   Use Force Push to overwrite remote, or Pull to sync first.\n</span>';
+              }else{
+                if(ld3) ld3.innerHTML+='<span style="color:#fbbf24">💡 Remote has new commits. Pull first, then push.\n</span>';
+              }
               var pullRetryBtn=document.createElement('button');
               pullRetryBtn.className='btn btn-success';
               pullRetryBtn.textContent='⬇️ Pull & Retry Push';
@@ -1443,10 +1614,17 @@ function doPush(credentials, force){
               forceBtn.className='btn btn-warning';
               forceBtn.textContent='⚠️ Force Push';
               forceBtn.onclick=function(){
-                showModal('⚠️ Force Push Warning',
-                  '<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:8px;padding:12px 14px;margin-bottom:10px;color:#7f1d1d">'
-                  +'<b>Force push overwrites remote history!</b><br>Remote commits not in your local branch will be lost. Only do this if you are absolutely sure.</div>'
-                  +'Proceed with <b>git push --force-with-lease</b>?',
+                var warningMsg=isNonFastForward&&!isRejectedFetchFirst
+                  ?'<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:8px;padding:12px 14px;margin-bottom:10px;color:#7f1d1d">'
+                    +'<b>⚠️ You did a git reset --hard (or similar rewrite).</b><br><br>'
+                    +'Force push will <b>overwrite the remote branch</b> with your local history.<br>'
+                    +'Remote commits newer than your reset point will be <b>permanently lost</b>.<br><br>'
+                    +'Only proceed if you are absolutely sure.</div>'
+                    +'Proceed with <b>git push --force-with-lease</b>?'
+                  :'<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:8px;padding:12px 14px;margin-bottom:10px;color:#7f1d1d">'
+                    +'<b>Force push overwrites remote history!</b><br>Remote commits not in your local branch will be lost. Only do this if you are absolutely sure.</div>'
+                    +'Proceed with <b>git push --force-with-lease</b>?';
+                showModal('⚠️ Force Push Warning', warningMsg,
                   'Force Push',
                   function(){ closeModal(); setTimeout(function(){ doPushForce(); },300); }
                 );
@@ -1541,24 +1719,50 @@ function doPull() {
   addMsg(t('pulling'),'info');
   apiGet('/api/has-uncommitted',function(hasData){
     if(hasData&&hasData.hasChanges){
-      addMsg('🔒 Local changes detected — auto-stashing before pull...','info');
-      apiPost('/api/stash',{},function(stashData){
-        if(!stashData.ok){
-          addMsg('⚠️ Auto-stash failed: '+(stashData.error||'')+'. Fix local changes first.','error');
-          return;
-        }
-        _executePull('merge',function(ok){
-          apiPost('/api/stash-pop',{index:0},function(popData){
-            if(!popData.ok){
-              addMsg('⚠️ Stash pop conflict after pull — check Conflicts tab','error');
-              checkConflicts();
-            } else {
-              addMsg('✅ Local changes restored after pull','ok');
-            }
+      // Show 3-option dialog: Stash & Pull / Pull Anyway / Cancel
+      showModal(
+        '🔒 Local Changes Detected',
+        '<div style="font-size:14px;line-height:1.7">'
+        +'You have uncommitted local changes.<br><br>'
+        +'<b>📦 Stash & Pull</b> — saves your changes to stash, pulls, you restore manually from Stash tab.<br>'
+        +'<b>⬇️ Pull Anyway</b> — pulls without touching your local changes (may conflict).<br>'
+        +'<b>Cancel</b> — do nothing.'
+        +'</div>',
+        null, null
+      );
+
+      var btnsDiv=document.getElementById('modal-btns');
+      btnsDiv.innerHTML='';
+      var cancelBtn=document.createElement('button');
+      cancelBtn.className='btn btn-secondary';cancelBtn.textContent='Cancel';
+      cancelBtn.onclick=closeModal;
+      var pullBtn=document.createElement('button');
+      pullBtn.className='btn btn-primary';pullBtn.textContent='⬇️ Pull Anyway';
+      pullBtn.onclick=function(){
+        closeModal();
+        addMsg('⬇️ Pulling...','info');
+        _executePull('rebase',function(){ loadFiles(); });
+      };
+      var stashBtn=document.createElement('button');
+      stashBtn.className='btn btn-warning';stashBtn.textContent='📦 Stash & Pull';
+      stashBtn.onclick=function(){
+        closeModal();
+        addMsg('📦 Stashing local changes before pull...','info');
+        apiPost('/api/stash',{},function(stashData){
+          if(!stashData.ok){
+            addMsg('⚠️ Stash failed: '+(stashData.error||'')+'. Fix local changes first.','error');
+            return;
+          }
+          addMsg('✅ Changes stashed. Pulling...','info');
+          _executePull('rebase',function(ok){
             loadFiles();
+            if(ok) addMsg('✅ Pull OK. Your stashed changes are in the Stash tab — apply them when ready.','info');
           });
         });
-      });
+      };
+      btnsDiv.appendChild(cancelBtn);
+      btnsDiv.appendChild(pullBtn);
+      btnsDiv.appendChild(stashBtn);
     } else {
       _executePull('rebase',function(){ loadFiles(); });
     }
@@ -1647,7 +1851,7 @@ function _branchSortHeader(){
   return '<div style="display:flex;gap:16px;padding:6px 14px 4px;border-bottom:1px solid #e5e7eb;margin-bottom:4px;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px">'+
     '<span style="flex:1;cursor:pointer;user-select:none" onclick="toggleBranchSort(\'name\')" title="Sort by name">Name'+ni+'</span>'+
     '<span style="width:160px;cursor:pointer;user-select:none;text-align:right" onclick="toggleBranchSort(\'date\')" title="Sort by date">Last Commit'+di+'</span>'+
-    '<span style="width:196px"></span>'+
+    '<span style="width:294px"></span>'+
     '</div>';
 }
 
@@ -1671,15 +1875,16 @@ function loadBranches(page){
       html+='<span class="name">'+escapeHtml(b.name)+'</span>';
       html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
       if(isCur){
-        html+='<div style="width:196px;display:flex;justify-content:flex-end">';
+        html+='<div style="width:294px;display:flex;justify-content:flex-end">';
         html+='<span style="display:inline-flex;align-items:center;justify-content:center;width:90px;padding:4px 0;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:.3px;'
           +'background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;'
           +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
         html+='</div>';
       }else{
-        html+='<div style="width:196px;display:flex;gap:6px;justify-content:flex-end">';
-        html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
-        html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+        html+='<div style="width:294px;display:flex;gap:6px;justify-content:flex-end">';
+        html+='<button class="btn btn-sm" style="width:90px;background:#0ea5e9;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\'local\')">⚖️ Compare</button>';
+        html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge</button>';
+        html+='<button class="btn btn-sm" style="width:90px;background:#6366f1;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">✅ Checkout</button>';
         html+='</div>';
       }
       html+='</div>';
@@ -1689,9 +1894,10 @@ function loadBranches(page){
       html+='<div class="branch-item">';
       html+='<span class="name">'+escapeHtml(b.name)+'</span>';
       html+='<span style="font-size:12px;color:#9ca3af;margin-left:auto;margin-right:12px;white-space:nowrap">'+escapeHtml(b.date||'')+'</span>';
-      html+='<div style="width:196px;display:flex;gap:6px;justify-content:flex-end">';
-      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
-      html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      html+='<div style="width:294px;display:flex;gap:6px;justify-content:flex-end">';
+      html+='<button class="btn btn-sm" style="width:90px;background:#0ea5e9;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\'remote\')">⚖️ Compare</button>';
+      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge</button>';
+      html+='<button class="btn btn-sm" style="width:90px;background:#6366f1;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">✅ Checkout</button>';
       html+='</div>';
       html+='</div>';
     });
@@ -1827,6 +2033,13 @@ function mergeBranch(sourceBranch){
             null,
             'btn-success','btn-secondary'
           );
+        }else if(data.alreadyUpToDate){
+          addMsg('ℹ️ Already up to date — no changes to merge from '+sourceBranch,'info');
+          showModal('ℹ️ Already Up To Date',
+            '<div style="padding:12px 4px;color:#1e40af;font-size:14px">'+
+            '✅ <b>'+escapeHtml(curBranch)+'</b> already contains all changes from <b>'+escapeHtml(sourceBranch)+'</b>.<br><br>'+
+            'No merge commit was created.</div>',
+            'OK', null);
         }else if(data.hasConflict){
           addMsg('⚠️ Merge conflicts detected in '+sourceBranch,'error');
           checkConflicts();
@@ -1844,6 +2057,219 @@ function mergeBranch(sourceBranch){
       });
     }
   );
+}
+
+// ═══════════ Compare ═══════════
+var _cmpLocalBranches=[];
+var _cmpRemoteBranches=[];
+var _cmpSelSource={base:'remote', head:'remote'};
+var _cmpRequestSeq=0;
+
+function _renderCmpSourceButtons(sel){
+  var src=_cmpSelSource[sel];
+  var prefix=sel==='base'?'cmp-base':'cmp-head';
+  document.getElementById(prefix+'-remote').className='btn btn-sm '+(src==='remote'?'btn-primary':'btn-secondary');
+  document.getElementById(prefix+'-local').className='btn btn-sm '+(src==='local'?'btn-primary':'btn-secondary');
+}
+
+function setCmpSelSource(sel, src){
+  _cmpSelSource[sel]=src;
+  _renderCmpSourceButtons(sel);
+  var selEl=document.getElementById(sel==='base'?'compare-base-sel':'compare-head-sel');
+  var cur=selEl.value;
+  var list=src==='remote'?_cmpRemoteBranches:_cmpLocalBranches;
+  selEl.innerHTML='';
+  list.forEach(function(n){
+    var o=document.createElement('option');o.value=n;o.textContent=n;
+    // Try to keep same branch selected (strip origin/ for matching)
+    if(n===cur||n.replace(/^origin\//,'')===(cur||'').replace(/^origin\//,''))o.selected=true;
+    selEl.appendChild(o);
+  });
+  runCompare();
+}
+
+function _cmpLocalName(name){
+  return (name||'').replace(/^origin\//,'');
+}
+
+function _fillSel(selEl, list, prefer){
+  selEl.innerHTML='';
+  list.forEach(function(n){
+    var o=document.createElement('option');o.value=n;o.textContent=n;
+    if(n===prefer||n.replace(/^origin\//,'')===(prefer||'').replace(/^origin\//,''))o.selected=true;
+    selEl.appendChild(o);
+  });
+}
+
+function openCompare(headBranch, headSource){
+  switchPage('compare');
+  apiGet('/api/branches?page=1&per_page=0',function(data){
+    _cmpLocalBranches=(data.local||[]).map(function(b){return b.name});
+    _cmpRemoteBranches=(data.remote||[]).map(function(b){return b.name});
+    var curBranch=document.getElementById('branch-name').textContent.trim();
+    _cmpSelSource={base:headSource||'remote',head:'local'};
+    _renderCmpSourceButtons('base');
+    _renderCmpSourceButtons('head');
+    _fillSel(document.getElementById('compare-base-sel'),
+      _cmpSelSource.base==='remote'?_cmpRemoteBranches:_cmpLocalBranches, headBranch);
+    _fillSel(document.getElementById('compare-head-sel'),
+      _cmpSelSource.head==='remote'?_cmpRemoteBranches:_cmpLocalBranches, curBranch);
+    runCompare();
+  });
+}
+function swapCompare(){
+  var b=document.getElementById('compare-base-sel');
+  var h=document.getElementById('compare-head-sel');
+  var baseValue=b.value, headValue=h.value;
+  var baseSource=_cmpSelSource.base, headSource=_cmpSelSource.head;
+  _cmpSelSource.base=headSource;
+  _cmpSelSource.head=baseSource;
+  _fillSel(b, _cmpSelSource.base==='remote'?_cmpRemoteBranches:_cmpLocalBranches, headValue);
+  _fillSel(h, _cmpSelSource.head==='remote'?_cmpRemoteBranches:_cmpLocalBranches, baseValue);
+  _renderCmpSourceButtons('base');
+  _renderCmpSourceButtons('head');
+  runCompare();
+}
+function runCompare(){
+  var base=document.getElementById('compare-base-sel').value;
+  var head=document.getElementById('compare-head-sel').value;
+  var baseSource=_cmpSelSource.base;
+  var headSource=_cmpSelSource.head;
+  var requestSeq=++_cmpRequestSeq;
+  if(!base||!head)return;
+  document.getElementById('compare-summary').innerHTML='<div class="loading-bar"><span class="spinner"></span>Loading diff...</div>';
+  document.getElementById('compare-diff-area').innerHTML='';
+  document.getElementById('compare-file-sidebar').innerHTML='';
+  document.getElementById('compare-merge-btn-wrap').innerHTML='';
+  apiGet('/api/compare?base='+encodeURIComponent(base)+'&head='+encodeURIComponent(head)
+    +'&base_source='+encodeURIComponent(baseSource)+'&head_source='+encodeURIComponent(headSource),function(data){
+    if(requestSeq!==_cmpRequestSeq) return;
+    var curBranch=document.getElementById('branch-name').textContent.trim();
+    if(data.error){
+      document.getElementById('compare-summary').innerHTML=
+        '<div style="padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#b91c1c;font-weight:600">'
+        +'❌ '+escapeHtml(data.error)+'</div>';
+      document.getElementById('compare-file-sidebar').innerHTML='';
+      document.getElementById('compare-diff-area').innerHTML='';
+      return;
+    }
+
+    // ── Summary ──
+    var identical=!data.diff||!data.diff.trim();
+    var sumHtml='<div style="display:flex;align-items:center;gap:12px;padding:8px 14px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;flex-wrap:wrap;font-size:13px">';
+    sumHtml+='<span>🅰️ <b style="color:#1d4ed8">'+escapeHtml(base)+'</b></span>';
+    sumHtml+='<span style="color:#9ca3af">vs</span>';
+    sumHtml+='<span>🅱️ <b style="color:#7c3aed">'+escapeHtml(head)+'</b></span>';
+    sumHtml+='<span style="color:#9ca3af;margin-left:4px">│</span>';
+    if(identical){
+      sumHtml+='<span style="color:#16a34a;font-weight:700">✅ Branch A has no unique changes vs Branch B</span>';
+    }else{
+      sumHtml+='<span style="color:#374151">📄 <b>'+data.file_count+'</b> file(s)</span>';
+      var totalAdd=(data.diff.match(/^\+[^+]/mg)||[]).length;
+      var totalDel=(data.diff.match(/^-[^-]/mg)||[]).length;
+      if(totalAdd) sumHtml+='<span style="color:#16a34a;font-weight:700">+'+totalAdd+'</span>';
+      if(totalDel) sumHtml+='<span style="color:#dc2626;font-weight:700">−'+totalDel+'</span>';
+      if(data.commits&&data.commits.length)
+        sumHtml+='<span style="color:#6b7280;font-size:12px">'+data.commits.length+' commit(s) unique to Branch A</span>';
+      sumHtml+='<span style="font-size:11px;color:#9ca3af;margin-left:4px">🟢 green = A added &nbsp; 🔴 red = A removed</span>';
+    }
+    sumHtml+='</div>';
+    sumHtml+='<div style="margin-top:4px;font-family:monospace;font-size:11px;color:#9ca3af;padding:3px 8px;background:#f1f5f9;border-radius:4px">'
+      +'📂 cwd: '+escapeHtml(data.cwd||'?')
+      +' &nbsp;│&nbsp; $ '+escapeHtml(data.cmd||'')
+      +(data.diff_err?'&nbsp;│&nbsp;<span style="color:#f87171">err: '+escapeHtml(data.diff_err.slice(0,120))+'</span>':'')
+      +'</div>';
+    document.getElementById('compare-summary').innerHTML=sumHtml;
+
+    // ── Merge button ──
+    var mergeWrap=document.getElementById('compare-merge-btn-wrap');
+    var headCheckout=_cmpLocalName(head);
+    if(!identical&&base!==head){
+      var needsCheckout=(headCheckout!==curBranch);
+      var mergeBtn=document.createElement('button');
+      mergeBtn.className='btn btn-sm';
+      mergeBtn.style.cssText='background:#f97316;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap';
+      mergeBtn.innerHTML='⚡ Merge <b>'+escapeHtml(base)+'</b> → <b>'+escapeHtml(head)+'</b>';
+      mergeBtn.onclick=function(){
+        if(needsCheckout){
+          showModalDouble('⚠️ Must be on '+escapeHtml(headCheckout),
+            'You are on <b>'+escapeHtml(curBranch)+'</b>. To merge <b>'+escapeHtml(base)+'</b> into <b>'+escapeHtml(head)+'</b> you must first checkout <b>'+escapeHtml(headCheckout)+'</b>.<br><br>Checkout now?',
+            'Checkout '+headCheckout,function(){checkoutBranch(headCheckout);},
+            'Cancel',null,'btn-primary','btn-secondary');
+        }else{
+          mergeBranch(base);
+        }
+      };
+      mergeWrap.appendChild(mergeBtn);
+    }
+
+    if(identical){
+      document.getElementById('compare-file-sidebar').innerHTML='';
+      document.getElementById('compare-diff-area').innerHTML='<div class="empty" style="padding:40px;text-align:center">✅ Branch A has no unique changes compared with Branch B.</div>';
+      return;
+    }
+
+    // ── Split diff by file ──
+    var sections=data.diff.split(/(?=^diff --git )/m).filter(function(s){return s.trim()});
+    var fileEntries=[];
+    sections.forEach(function(section,idx){
+      var firstLine=section.split('\n')[0]||'';
+      var fm=firstLine.match(/diff --git a\/(.+) b\/.+/);
+      var fname=fm?fm[1]:firstLine.replace('diff --git ','');
+      var adds=(section.match(/^\+[^+]/mg)||[]).length;
+      var dels=(section.match(/^-[^-]/mg)||[]).length;
+      fileEntries.push({fname:fname,adds:adds,dels:dels,section:section,id:'cdiff-'+idx});
+    });
+
+    // ── Left sidebar: file list ──
+    var sideHtml='<div style="padding:8px 0">';
+    sideHtml+='<div style="padding:6px 12px;font-size:11px;font-weight:700;color:#6b7280;letter-spacing:.5px;border-bottom:1px solid #f3f4f6">CHANGED FILES ('+fileEntries.length+')</div>';
+    fileEntries.forEach(function(f){
+      var shortName=f.fname.split('/').pop();
+      var dirPart=f.fname.indexOf('/')>=0?f.fname.substring(0,f.fname.lastIndexOf('/')):'';
+      sideHtml+='<div class="compare-file-item" onclick="scrollToFileDiff(\''+f.id+'\')" title="'+escapeHtml(f.fname)+'">'
+        +'<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:#1e40af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escapeHtml(shortName)+'</div>'
+        +(dirPart?'<div style="font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escapeHtml(dirPart)+'</div>':'')
+        +'</div>'
+        +(f.adds?'<span style="color:#16a34a;font-size:11px;font-weight:700;margin-left:4px">+'+f.adds+'</span>':'')
+        +(f.dels?'<span style="color:#dc2626;font-size:11px;font-weight:700;margin-left:2px">−'+f.dels+'</span>':'')
+        +'</div>';
+    });
+    sideHtml+='</div>';
+    document.getElementById('compare-file-sidebar').innerHTML=sideHtml;
+
+    // ── Right: per-file diffs ──
+    var diffHtml='';
+    fileEntries.forEach(function(f){
+      diffHtml+='<div class="compare-diff-section" id="'+f.id+'">'
+        +'<div class="compare-diff-header" onclick="toggleCompareDiff(\''+f.id+'-body\')">'
+        +'<span style="flex:1;font-family:monospace;font-size:13px;color:#1e40af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escapeHtml(f.fname)+'">'+escapeHtml(f.fname)+'</span>'
+        +(f.adds?'<span class="compare-stat-add" style="margin-left:8px">+'+f.adds+'</span>':'')
+        +(f.dels?'<span class="compare-stat-del" style="margin-left:4px">−'+f.dels+'</span>':'')
+        +'<span id="'+f.id+'-body-arrow" style="font-size:11px;color:#9ca3af;margin-left:8px">▼</span>'
+        +'</div>'
+        +'<div class="compare-diff-body" id="'+f.id+'-body">'
+        +highlightDiff(f.section)
+        +'</div>'
+        +'</div>';
+    });
+    document.getElementById('compare-diff-area').innerHTML=diffHtml;
+  });
+}
+function scrollToFileDiff(id){
+  var el=document.getElementById(id);
+  if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  // Ensure it's open
+  var body=document.getElementById(id+'-body');
+  if(body&&body.style.display==='none'){toggleCompareDiff(id+'-body');}
+}
+function toggleCompareDiff(id){
+  var el=document.getElementById(id);
+  var arrow=document.getElementById(id+'-arrow');
+  if(!el)return;
+  var hidden=el.style.display==='none';
+  el.style.display=hidden?'':'none';
+  if(arrow)arrow.textContent=hidden?'▼':'▶';
 }
 
 // ═══════════ Stash ═══════════
@@ -2197,8 +2623,9 @@ function _renderFilteredBranches(search){
         +'box-shadow:0 0 0 2px rgba(99,102,241,.3),0 2px 8px rgba(29,78,216,.35)">✓ Current</span>';
     }else{
       html+='<div style="display:flex;gap:6px;flex-shrink:0">';
-      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge↓</button>';
-      html+='<button class="btn btn-primary btn-sm" style="width:90px" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">Checkout</button>';
+      html+='<button class="btn btn-sm" style="width:90px;background:#0ea5e9;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\''+(b.type==='local'?'local':'remote')+'\')">⚖️ Compare</button>';
+      html+='<button class="btn btn-sm" style="width:90px;background:#f97316;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge</button>';
+      html+='<button class="btn btn-sm" style="width:90px;background:#6366f1;color:#fff;border:none;cursor:pointer;border-radius:6px;font-size:12px;font-weight:600;padding:5px 0" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">✅ Checkout</button>';
       html+='</div>';
     }
     html+='</div>';
@@ -2723,8 +3150,23 @@ document.getElementById('reset-btn').addEventListener('click',function(){
 
 // ═══════════ Init ═══════════
 loadCurrentBranch();
-loadFiles();
-checkConflicts();
+// Restore last active tab
+(function(){
+  var saved=null;
+  try{saved=localStorage.getItem('git_tool_active_tab');}catch(e){}
+  var safeTabs={main:1,branches:1,log:1,stash:1,conflicts:1};
+  if(saved&&safeTabs[saved]){
+    switchPage(saved);
+    if(saved==='branches')loadBranches(1);
+    else if(saved==='log')loadLog(1);
+    else if(saved==='stash')loadStash();
+    else if(saved==='conflicts'){loadFiles();checkConflicts();}
+    else{loadFiles();checkConflicts();}
+  }else{
+    loadFiles();
+    checkConflicts();
+  }
+})();
 
 // Position tooltips using fixed coords to avoid overflow clipping
 document.querySelectorAll('.git-action-btn').forEach(function(btn){
@@ -2824,6 +3266,43 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error":"Job not found"},404)
             else:
                 self._json(dict(job))
+        elif path=="/api/compare":
+            import os as _osc
+            qs=parse_qs(parsed.query) if parsed.query else {}
+            base = qs.get("base", [""])[0]
+            head = qs.get("head", [""])[0]
+            base_source = qs.get("base_source", ["auto"])[0]
+            head_source = qs.get("head_source", ["auto"])[0]
+            if not base or not head:
+                self._json({"error": "base and head required"}, 400); return
+            cwd = _osc.getcwd()
+            base_ref = _resolve_ref_for_compare(base, base_source)
+            head_ref = _resolve_ref_for_compare(head, head_source)
+            if not _ref_exists(base_ref):
+                self._json({"error": f"Branch A not found: {base_ref}"}, 400); return
+            if not _ref_exists(head_ref):
+                self._json({"error": f"Branch B not found: {head_ref}"}, 400); return
+            diff_cmd = ["git", "diff", f"{head_ref}...{base_ref}"]
+            stat_cmd = ["git", "diff", "--stat", f"{head_ref}...{base_ref}"]
+            log_cmd = ["git", "log", "--oneline", f"{head_ref}..{base_ref}"]
+            diff_out, diff_err, diff_rc = _run(diff_cmd)
+            stat_out, _, _ = _run(stat_cmd)
+            log_out, _, _ = _run(log_cmd)
+            commits = [l for l in log_out.splitlines() if l.strip()]
+            file_lines = [l for l in stat_out.splitlines() if " | " in l or "=>" in l]
+            self._json({
+                "base": base, "head": head,
+                "base_source": base_source, "head_source": head_source,
+                "base_ref": base_ref, "head_ref": head_ref,
+                "diff": diff_out,
+                "diff_err": diff_err,
+                "diff_rc": diff_rc,
+                "stat": stat_out,
+                "commits": commits,
+                "file_count": len(file_lines),
+                "cwd": cwd,
+                "cmd": " ".join(diff_cmd)
+            })
         elif path=="/api/ignored-list":
             import os as _os4
             gitignore_path = _os4.path.join(_os4.getcwd(), '.gitignore')
@@ -2891,6 +3370,10 @@ class Handler(BaseHTTPRequestHandler):
             if not msg: self._json({"ok":False,"error":"empty msg"},400); return
             if not paths: self._json({"ok":False,"error":"no files"},400); return
             for p in paths: _run(["git","add",p])
+            # Verify something is actually staged before committing
+            _,_,diff_rc=_run(["git","diff","--cached","--quiet"])
+            if diff_rc==0:
+                self._json({"ok":False,"error":"Nothing to commit — selected files have no staged changes."},400); return
             stdout,stderr,rc=_run(["git","commit","-m",msg])
             self._json({"ok":True,"stdout":stdout} if rc==0 else {"ok":False,"error":stderr or stdout},400)
 
@@ -2972,11 +3455,19 @@ class Handler(BaseHTTPRequestHandler):
                 combined=(out+"\n"+err).strip()
                 has_conflict=rc!=0 and ("CONFLICT" in combined or "Automatic merge failed" in combined)
                 if rc==0:
-                    # Commit the squashed changes with the user's message
-                    cout,cerr,crc=_run(["git","commit","-m",message])
-                    combined=(combined+"\n"+cout+"\n"+cerr).strip()
-                    self._json({"ok":crc==0,"log":combined,"hasConflict":False,
-                                "error":cerr if crc!=0 else ""})
+                    # Check if squash actually staged anything
+                    _,_,diff_rc=_run(["git","diff","--cached","--quiet"])
+                    if diff_rc==0:
+                        # Nothing staged — branches are already identical in content
+                        self._json({"ok":False,"log":combined,"hasConflict":False,
+                                    "alreadyUpToDate":True,
+                                    "error":"Branches are already up to date — no differences to merge."})
+                    else:
+                        # Commit the squashed changes with the user's message
+                        cout,cerr,crc=_run(["git","commit","-m",message])
+                        combined=(combined+"\n"+cout+"\n"+cerr).strip()
+                        self._json({"ok":crc==0,"log":combined,"hasConflict":False,
+                                    "error":cerr if crc!=0 else ""})
                 else:
                     self._json({"ok":False,"log":combined,"hasConflict":has_conflict,
                                 "error":combined})
