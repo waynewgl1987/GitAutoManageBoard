@@ -8,6 +8,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.6%2B-blue?logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)]()
+[![Version](https://img.shields.io/badge/Version-v1.0.0-purple)]()
 
 [English](#english) · [中文](#中文)
 
@@ -33,16 +34,17 @@ No frameworks, no npm, no Docker. Just Python 3 and a modern browser.
 
 ### ✨ Features at a Glance
 
-| Tab | What you can do |
-|-----|----------------|
+| Tab / Area | What you can do |
+|-----------|----------------|
 | **Commit** | Stage / unstage files, view inline diffs, write commit messages, commit with one click. Manage `.gitignore` entries. |
-| **Branches** | View local & remote branches, create branches, switch branches, fuzzy search, pagination. Sort by name or date. |
+| **Branches** | View local & remote branches, create branches, switch branches, delete local/remote branches (with safety guards), fuzzy search, pagination, sort. |
 | **Compare** | Side-by-side branch comparison — visual diff, file-by-file navigation, swap branches, one-click merge. |
 | **Merge** | Squash-merge any branch into the current branch with a custom commit message and conflict warnings. |
 | **Commit Log** | Browse full history. Search by hash / author / message / code-in-diffs. Soft/Hard reset, revert, squash commits. Restore individual files to any historical version. |
-| **Conflicts** | Side-by-side visual conflict resolution — pick ours, theirs, manual edit, or raw file edit. Jump between conflict blocks. Auto-complete merge after resolution. |
+| **Conflicts** | Visual conflict resolution with collapsible context blocks, resolved banners, step-by-step dialogs to commit and push after resolution. |
 | **Stash** | List, inspect, pop, or drop stash entries. Pagination support. |
-| **Remote** | Fetch, Pull (merge / rebase / fast-forward), Push — all with live streaming output. Force push with `--force-with-lease`. Auto SSH/HTTPS switching. |
+| **Remote** | Fetch, Pull, Push — all with live streaming log popups. Force push with `--force-with-lease`. Auto SSH/HTTPS switching. |
+| **Config** | Customise app name and version via `config.ini`. |
 
 ---
 
@@ -92,6 +94,8 @@ The default landing page. Shows all **unstaged and staged changes** in your work
 - **⬇️ Pull Anyway** — pull without touching local changes (may cause conflicts).
 - **Cancel** — do nothing.
 
+---
+
 #### 2 · Branches Tab
 
 Manage all local and remote branches in one place.
@@ -102,10 +106,26 @@ Manage all local and remote branches in one place.
 - **Create Branch** — type a name and optionally base it on another branch. After creation, a modal offers to **push to remote** immediately.
 - **Switch Branch** — click any branch name. If uncommitted changes exist, a modal prompts to **stash** them first, then switch. After switching with stash, you can choose to **apply stash** to the new branch or keep it for later.
 - **Fuzzy Search** — type to filter branches by name. Quick-filter tags for `develop`, `release`, `feature`, and `hotfix` prefixes.
-- Per-branch action buttons on each non-current branch:
-  - ⚖️ **Compare** — opens the Compare page with this branch as Branch A.
-  - ⚡ **Merge** — squash-merge this branch into the current branch.
-  - ✅ **Checkout** — switch to this branch.
+
+**Per-branch actions (click ▼ to expand a branch row):**
+- ⚖️ **Compare** — opens the Compare page with this branch as Branch A.
+- ⚡ **Merge** — squash-merge this branch into the current branch.
+- ✅ **Checkout** — switch to this branch.
+- 🗑 **Delete Branch** — hidden inside the expandable panel to prevent accidental clicks.
+
+**Delete Branch flow:**
+1. Click **▼** at the right edge of any branch row to expand its action panel.
+   - Opening one row **automatically collapses** all others.
+2. Click **🗑 Delete Branch** — a modal asks whether to delete the **local** or **remote** branch.
+3. **Local delete:**
+   - Runs `git branch -d` (safe delete — aborts if not fully merged).
+   - If the branch is **not fully merged**, an amber warning appears offering **Force Delete** (`git branch -D`).
+4. **Remote delete:**
+   - Shows a **🚨 IRREVERSIBLE** warning modal explaining the remote branch will be gone permanently.
+   - After confirming, a **second confirmation** dialog is shown before proceeding.
+   - Deletion progress is displayed in a **terminal-style log popup** (same style as Push), which can be closed manually while the operation continues.
+
+---
 
 #### 3 · Compare Page
 
@@ -120,6 +140,8 @@ Side-by-side comparison of any two branches — local or remote.
 - If branches are identical, a clear "no unique changes" message is shown.
 - **⚡ Merge** button — merges Branch A into Branch B. If needed, auto-checks-out Branch B first.
 
+---
+
 #### 4 · Merge (from any branch)
 
 Accessible from the **Branches** or **Compare** page via the ⚡ Merge button.
@@ -133,6 +155,8 @@ Accessible from the **Branches** or **Compare** page via the ⚡ Merge button.
 - Click **Merge Now** — the tool performs a squash-merge (`git merge --squash`) and commits.
 - On success, offers to **push** to remote immediately.
 - If conflicts occur, redirects to the Conflicts tab for resolution.
+
+---
 
 #### 5 · Commit Log Tab
 
@@ -162,6 +186,8 @@ Explore the full commit history of the current branch.
 **Reset Conflict State:**
   - Click **Reset Conflict State** to abort any ongoing merge / rebase / cherry-pick and return to the last clean commit.
 
+---
+
 #### 6 · Restore File Page
 
 Accessible from the Commit Log — restore any file to a specific historical version.
@@ -170,6 +196,8 @@ Accessible from the Commit Log — restore any file to a specific historical ver
 - Browse the file's **commit history** (paginated), with per-commit diffs showing only that file's changes.
 - Click **Restore to this** on any commit to overwrite the current working copy with that version.
 - A confirmation modal warns before proceeding.
+
+---
 
 #### 7 · Conflicts Tab
 
@@ -180,15 +208,26 @@ The **Conflicts** tab badge shows the current conflict count in red.
 - **Auto-expand** the first file on load.
 - Expand a file to see **conflict zone rendering**:
   - **Ours** (current branch, green panel) vs **Theirs** (incoming, blue panel).
-  - **Normal context blocks** (non-conflict code) shown as collapsible sections.
+  - **Context blocks** (non-conflict surrounding code) are **collapsed by default** (▶) to keep the view clean. Click to expand/collapse at any time.
 - Each conflict block can be resolved independently:
   - ✅ **Use Ours** — accept the current branch version.
   - 🔵 **Use Theirs** — accept the incoming version.
   - ✏️ **Edit manually** — write a custom resolution in a textarea. Click **Save this block** to apply.
+- Once a conflict block is resolved, a **gradient "RESOLVED" banner** replaces that block as a clear visual indicator.
 - A **jump bar** (◀ Prev / Next ▶) navigates between multiple conflict blocks in the same file.
-- **💾 Save & Resolve File** — writes all resolved blocks back to the file and runs `git add`.
 - **📝 Edit raw file** — open the entire file in a raw text editor for manual resolution.
-- **Auto-complete merge** — when the last conflict file is resolved, the tool automatically runs `git commit --no-edit` (or `git rebase --continue` / `git cherry-pick --continue`) to complete the merge. No manual CLI step needed.
+
+**💾 Save & Resolve File flow:**
+1. Click **Save & Resolve** after resolving all blocks in a file.
+2. If any conflict block is **still unresolved**, a **warning modal** appears asking for confirmation before proceeding (cancel to go back and resolve them).
+3. After saving the last conflict file, a **commit dialog** appears:
+   - Enter a custom commit message.
+   - Click **Confirm** to commit the merge/resolution automatically.
+4. After the commit, a **push dialog** asks whether to push to remote immediately:
+   - Click **Push Now** to push with a live log popup.
+   - Click **Cancel** to push manually later via the top-bar Push button.
+
+---
 
 #### 8 · Stash Tab
 
@@ -196,6 +235,8 @@ The **Conflicts** tab badge shows the current conflict count in red.
 - **Pop** — apply the stash back and remove it from the stack.
 - **Drop** — permanently delete a stash entry (with confirmation modal).
 - Pagination for repositories with many stash entries (1 / 5 / 10 / 20 / 50 / 100 / 300 per page, or all).
+
+---
 
 #### 9 · Remote Operations (Top Bar)
 
@@ -205,7 +246,10 @@ Three buttons always visible at the top:
 |--------|---------|-------------|
 | ⬇ **Fetch** | `git fetch --all --prune --verbose` | Download remote refs without merging |
 | 🔄 **Pull** | `git pull --rebase --verbose` (default) | Sync remote commits to local branch |
-| 🚀 **Push** | `git push --verbose --progress` | Send local commits to remote with live streaming log |
+| 🚀 **Push** | `git push --verbose --progress` | Send local commits to remote |
+
+All three operations open a **terminal-style streaming log popup** showing live output line by line.  
+The popup can be **closed manually** at any time — the operation continues running in the background.
 
 **Pull features:**
 - Supports three strategies: **merge**, **rebase**, and **fast-forward only**.
@@ -229,11 +273,43 @@ Three buttons always visible at the top:
     - **Pull & Retry Push** — pull first, then retry push.
   - Also accessible manually via the top-right menu or after a squash on a protected branch.
 
-#### 10 · Language Support
+---
+
+#### 10 · App Branding & Configuration (`config.ini`)
+
+The app name and version displayed in the top-right header can be customised via `config.ini` in the same directory as the script:
+
+```ini
+[app]
+# Application display name shown in the top-right header
+name = Git Manage Board
+
+# Version string shown below the app name
+version = v1.0.0
+```
+
+- Changes take effect on the next page reload (no server restart required for this config).
+- The top-right area displays the project name as a badge and the version below it.
+
+---
+
+#### 11 · Layout & Navigation
+
+- **Top bar** is a 3-column layout:
+  - **Left** — Current Branch name (aligned with page content below).
+  - **Center** — Tab buttons (Commit / Branches / Commit Log / Conflicts / Stash) + REMOTE actions (Fetch / Pull / Push).
+  - **Right** — Language selector (EN / 中文).
+- **Project name** is shown in the purple header in the top-right as a frosted pill badge, with version below.
+
+---
+
+#### 12 · Language Support
 
 Click the **EN / 中文** selector in the top-right corner to switch the entire UI between English and Chinese instantly. The preference is saved in `localStorage`.
 
-#### 11 · Message Log
+---
+
+#### 13 · Message Log
 
 All operation results (commits, pulls, pushes, resets, merges, …) are stored in an in-session memory log.
 - Messages appear in the **message area** below the top bar and can be dismissed individually.
@@ -250,6 +326,7 @@ All operation results (commits, pulls, pushes, resets, merges, …) are stored i
 - All diff blocks support horizontal scrolling for long lines.
 - The last active tab is **persisted** in `localStorage` and restored on page reload.
 - Hover over **Fetch / Pull / Push** buttons for descriptions.
+- Branch accordion rows: opening one row **auto-closes** others.
 
 ---
 
@@ -266,6 +343,7 @@ All operation results (commits, pulls, pushes, resets, merges, …) are stored i
 ```
 GitAutoManageBoard/
 ├── git_commit_tool.py   # Single-file app: HTTP server + Git API + embedded HTML/CSS/JS
+├── config.ini           # Optional: customise app name and version
 └── README.md
 ```
 
@@ -275,7 +353,7 @@ The entire application — backend logic, HTML, CSS, and JavaScript — lives in
 
 ### 📋 Requirements
 
-- Python ≥ 3.6 (standard library only — `http.server`, `subprocess`, `json`, `socket`, `threading`, `os`)
+- Python ≥ 3.6 (standard library only — `http.server`, `subprocess`, `json`, `socket`, `threading`, `os`, `configparser`)
 - Git ≥ 2.x
 
 No third-party packages required.
@@ -308,16 +386,17 @@ No third-party packages required.
 
 ### ✨ 功能一览
 
-| 标签页 | 你可以做的事 |
-|--------|------------|
+| 标签页 / 区域 | 你可以做的事 |
+|--------------|------------|
 | **提交 (Commit)** | 暂存/取消暂存文件、查看内联 diff、填写提交信息、一键提交。管理 `.gitignore` 条目。 |
-| **分支 (Branches)** | 查看本地和远端分支、创建分支、切换分支、模糊搜索、分页。按名称或日期排序。 |
+| **分支 (Branches)** | 查看本地和远端分支、创建分支、切换分支、删除本地/远端分支（带安全防护）、模糊搜索、分页、排序。 |
 | **对比 (Compare)** | 左右对比任意两个分支 — 可视化 diff、逐文件导航、交换分支、一键合并。 |
 | **合并 (Merge)** | 将任意分支 Squash-merge 到当前分支，支持自定义提交信息和冲突警告。 |
 | **提交日志 (Commit Log)** | 浏览完整历史。按 hash / 作者 / 消息 / 代码内容搜索。Soft/Hard Reset、Revert、Squash 合并提交。将单个文件还原到任意历史版本。 |
-| **冲突 (Conflicts)** | 左右对比可视化冲突解决 — 选择我方、他方、手动编辑或原始文件编辑。冲突块之间跳转导航。解决完毕后自动完成 merge。 |
+| **冲突 (Conflicts)** | 可视化冲突解决，上下文默认收缩、已解决标记横幅、逐步弹窗引导 commit 和 push。 |
 | **暂存 (Stash)** | 列出、查看、Pop 或删除 stash 条目。支持分页。 |
-| **远端 (Remote)** | Fetch、Pull（merge / rebase / fast-forward）、Push — 全部支持实时流式输出。Force Push (`--force-with-lease`)。自动 SSH/HTTPS 切换。 |
+| **远端 (Remote)** | Fetch、Pull、Push — 全部支持实时流式日志弹窗。Force Push（`--force-with-lease`）。自动 SSH/HTTPS 切换。 |
+| **配置 (Config)** | 通过 `config.ini` 自定义应用名称和版本号。 |
 
 ---
 
@@ -367,6 +446,8 @@ python3 /path/to/git_commit_tool.py
 - **⬇️ Pull Anyway** — 直接拉取，不改动本地文件（可能冲突）。
 - **Cancel** — 取消操作。
 
+---
+
 #### 2 · 分支 (Branches) 标签页
 
 在一个页面管理所有本地和远端分支。
@@ -377,10 +458,26 @@ python3 /path/to/git_commit_tool.py
 - **新建分支** — 输入名称，可选择基于当前分支创建。创建后弹出模态框可选择**立即推送到远端**。
 - **切换分支** — 点击任意非当前分支的 **✅ Checkout** 按钮。如有未提交改动，会提示**先 stash 再切换**。切换后可选择将 stash **应用到新分支**或保留备用。
 - **模糊搜索** — 实时输入过滤分支名称。内置 `develop`、`release`、`feature`、`hotfix` 前缀快捷筛选标签。
-- 每个非当前分支的操作按钮：
-  - ⚖️ **Compare** — 打开对比页面，该分支作为 Branch A。
-  - ⚡ **Merge** — 将该分支 Squash-merge 到当前分支。
-  - ✅ **Checkout** — 切换到该分支。
+
+**每个分支行的展开操作（点击右侧 ▼ 箭头展开）：**
+- ⚖️ **Compare** — 打开对比页面，该分支作为 Branch A。
+- ⚡ **Merge** — 将该分支 Squash-merge 到当前分支。
+- ✅ **Checkout** — 切换到该分支。
+- 🗑 **Delete Branch** — 删除按钮隐藏在展开面板中，避免误点击。
+
+**删除分支流程：**
+1. 点击分支行右侧的 **▼** 箭头展开操作面板。
+   - 展开一行会**自动收起其他所有已展开的行**。
+2. 点击 **🗑 Delete Branch** — 弹窗询问删除**本地分支**还是**远端分支**。
+3. **删除本地分支：**
+   - 执行 `git branch -d`（安全删除 — 未完全合并时拒绝）。
+   - 如果分支**未完全合并**，弹出橙色警告框，提供**强制删除**（`git branch -D`）选项。
+4. **删除远端分支：**
+   - 显示 **🚨 不可逆** 警告弹窗，说明远端分支一旦删除将永久消失。
+   - 确认后再次弹出**二次确认**对话框，避免误操作。
+   - 删除进度以**终端风格日志弹窗**显示（与 Push 相同风格），可手动关闭但后台继续执行。
+
+---
 
 #### 3 · 对比 (Compare) 页面
 
@@ -395,6 +492,8 @@ python3 /path/to/git_commit_tool.py
 - 分支完全相同时显示"无独有变更"提示。
 - **⚡ Merge** 按钮 — 将 Branch A 合并到 Branch B（如需要会自动先 Checkout B）。
 
+---
+
 #### 4 · 合并 (Merge) 任意分支
 
 从**分支**页面或**对比**页面的 ⚡ Merge 按钮触发。
@@ -408,6 +507,8 @@ python3 /path/to/git_commit_tool.py
 - 点击 **Merge Now** — 执行 squash-merge（`git merge --squash`）并提交。
 - 成功后弹出选项**立即推送到远端**。
 - 如发生冲突，自动导向 Conflicts 页面。
+
+---
 
 #### 5 · 提交日志 (Commit Log) 标签页
 
@@ -437,6 +538,8 @@ python3 /path/to/git_commit_tool.py
 **重置冲突状态：**
   - 点击 **Reset Conflict State** 中止当前 merge / rebase / cherry-pick，回到最后干净状态。
 
+---
+
 #### 6 · 还原文件 (Restore File) 页面
 
 从提交日志进入 — 将任意文件还原到指定的历史版本。
@@ -446,24 +549,36 @@ python3 /path/to/git_commit_tool.py
 - 点击任意 commit 的 **Restore to this** 按钮，将当前工作区文件覆盖为该版本。
 - 执行前弹出确认模态框。
 
+---
+
 #### 7 · 冲突 (Conflicts) 标签页
 
 当 merge、rebase 或 cherry-pick 产生冲突时自动触发。  
 **Conflicts** 标签页徽章以红色显示当前冲突数量。
 
-- 列出所有冲突文件。
-- 页面加载时**自动展开**第一个文件。
+- 列出所有冲突文件，页面加载时**自动展开**第一个文件。
 - 展开文件可查看**冲突区域渲染**：
   - **我方 (Ours)**（绿色面板，当前分支）vs **他方 (Theirs)**（蓝色面板，传入版本）。
-  - **正常上下文块**（非冲突代码）以可折叠区域显示。
+  - **上下文代码块**（冲突周围的正常代码）**默认收缩**（▶ 箭头），保持界面简洁。你可以随时点击展开或收起。
 - 每个冲突块可独立解决：
   - ✅ **Use Ours** — 接受当前分支版本。
   - 🔵 **Use Theirs** — 接受传入版本。
   - ✏️ **Edit manually** — 在文本框中填写自定义内容。点击 **Save this block** 生效。
+- 某个冲突块解决后，该区域会显示**"RESOLVED" 渐变横幅**，作为醒目的视觉反馈。
 - **跳转栏**（◀ Prev / Next ▶）在同一文件的多个冲突块之间导航。
-- **💾 Save & Resolve File** — 将所有已解决块写回文件并执行 `git add`。
 - **📝 Edit raw file** — 在原始文本编辑器中打开整个文件，手动编辑解决。
-- **自动完成 merge** — 当最后一个冲突文件被解决后，工具自动执行 `git commit --no-edit`（或 `git rebase --continue` / `git cherry-pick --continue`）完成合并。无需手动命令行操作。
+
+**💾 Save & Resolve 保存流程：**
+1. 点击 **Save & Resolve** 保存已解决的冲突。
+2. 若仍有**未解决的冲突块**，弹出**警告模态框**提示确认，你可以取消返回继续解决。
+3. 所有冲突文件解决完毕后，弹出 **Commit 对话框**：
+   - 输入自定义提交信息。
+   - 点击**确认**，工具自动完成 merge 提交（`git commit -m`）。
+4. Commit 完成后，弹出 **Push 确认对话框**：
+   - 点击 **Push Now** — 立即推送，并显示实时日志弹窗。
+   - 点击 **Cancel** — 稍后通过顶部 Push 按钮手动推送。
+
+---
 
 #### 8 · Stash 标签页
 
@@ -471,6 +586,8 @@ python3 /path/to/git_commit_tool.py
 - **Pop** — 将 stash 应用回工作区并从堆栈中移除。
 - **Drop** — 永久删除一条 stash 记录（含确认模态框）。
 - 支持分页（每页 1 / 5 / 10 / 20 / 50 / 100 / 300 条，或全部）。
+
+---
 
 #### 9 · 远端操作（顶部工具栏）
 
@@ -480,7 +597,10 @@ python3 /path/to/git_commit_tool.py
 |------|------|------|
 | ⬇ **Fetch** | `git fetch --all --prune --verbose` | 下载远端引用，不进行合并 |
 | 🔄 **Pull** | `git pull --rebase --verbose`（默认） | 将远端提交同步到本地分支 |
-| 🚀 **Push** | `git push --verbose --progress` | 将本地提交推送到远端，实时流式日志 |
+| 🚀 **Push** | `git push --verbose --progress` | 将本地提交推送到远端 |
+
+三个操作均会打开**终端风格的实时日志弹窗**，逐行显示进度输出。  
+弹窗可随时**手动关闭**，操作在后台继续运行。
 
 **Pull 功能：**
 - 支持三种策略：**merge（合并）**、**rebase（变基）**、**fast-forward only（仅快进）**。
@@ -504,11 +624,43 @@ python3 /path/to/git_commit_tool.py
     - **Pull & Retry Push** — 先拉取再重试推送。
   - 也可在重要分支上 Squash 后手动触发。
 
-#### 10 · 语言支持
+---
+
+#### 10 · 应用品牌与配置 (`config.ini`)
+
+右上角顶部区域显示的应用名称和版本号，可通过脚本同目录下的 `config.ini` 自定义：
+
+```ini
+[app]
+# 显示在右上角的应用名称
+name = Git Manage Board
+
+# 显示在名称下方的版本号
+version = v1.0.0
+```
+
+- 修改后刷新页面即可生效，无需重启服务器。
+- 右上角紫色区域以磨砂胶囊样式展示应用名，版本号独立显示在名称下方。
+
+---
+
+#### 11 · 布局与导航
+
+- **顶部工具栏**采用三列布局：
+  - **左侧** — 当前分支名称，与下方页面内容左对齐。
+  - **中间** — 标签页按钮（Commit / Branches / Commit Log / Conflicts / Stash）+ 远端操作（Fetch / Pull / Push），居中展示。
+  - **右侧** — 语言切换器（EN / 中文）。
+- **项目名称**以磨砂胶囊徽章形式显示在右上角紫色区域，版本号显示在其下方。
+
+---
+
+#### 12 · 语言支持
 
 点击右上角的 **EN / 中文** 选择器，可随时切换整个 UI 的语言。偏好设置保存在 `localStorage` 中，刷新页面后依然生效。
 
-#### 11 · 消息日志
+---
+
+#### 13 · 消息日志
 
 所有操作结果（提交、拉取、推送、重置、合并等）都会在会话内存中保存。
 - 消息显示在顶部工具栏下方的**消息区域**，可逐条关闭。
@@ -525,6 +677,7 @@ python3 /path/to/git_commit_tool.py
 - 所有 diff 块支持横向滚动，方便查看长行代码。
 - 上次激活的标签页会被**记忆**在 `localStorage` 中，页面刷新后自动恢复。
 - 鼠标悬停在 **Fetch / Pull / Push** 按钮上可查看功能描述。
+- 分支行展开/收起：展开一行会**自动收起**其他已展开的行。
 
 ---
 
@@ -541,6 +694,7 @@ python3 /path/to/git_commit_tool.py
 ```
 GitAutoManageBoard/
 ├── git_commit_tool.py   # 单文件应用：HTTP 服务器 + Git API + 内嵌 HTML/CSS/JS
+├── config.ini           # 可选：自定义应用名称和版本号
 └── README.md
 ```
 
@@ -550,7 +704,7 @@ GitAutoManageBoard/
 
 ### 📋 环境要求
 
-- Python ≥ 3.6（仅使用标准库：`http.server`、`subprocess`、`json`、`socket`、`threading`、`os`）
+- Python ≥ 3.6（仅使用标准库：`http.server`、`subprocess`、`json`、`socket`、`threading`、`os`、`configparser`）
 - Git ≥ 2.x
 
 **无需安装任何第三方依赖包。**
