@@ -251,21 +251,35 @@ def handle_post(path, data, send_json):
                 )
                 selected = r.stdout.strip()
             elif system == "Windows":
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes('-topmost', True)
-                selected = filedialog.askdirectory(title="Select Git Project")
-                root.destroy()
+                import tempfile, os as _os
+                vbs = (
+                    'Set objShell = CreateObject("Shell.Application")\r\n'
+                    'Set objFolder = objShell.BrowseForFolder(0, "Select Git Project", 0, 17)\r\n'
+                    'If Not objFolder Is Nothing Then\r\n'
+                    '    WScript.Echo objFolder.Self.Path\r\n'
+                    'End If'
+                )
+                tmp = tempfile.NamedTemporaryFile(suffix=".vbs", delete=False, mode="w")
+                tmp.write(vbs)
+                tmp.close()
+                r = subprocess.run(
+                    ["cscript", "//Nologo", tmp.name],
+                    capture_output=True, text=True, timeout=300,
+                )
+                _os.unlink(tmp.name)
+                selected = r.stdout.strip()
             else:
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()
-                selected = filedialog.askdirectory(title="Select Git Project")
-                root.destroy()
-        except Exception as e:
+                # Linux: try zenity, then kdialog
+                for cmd in (["zenity", "--file-selection", "--directory", "--title=Select Git Project"],
+                             ["kdialog", "--getexistingdirectory"]):
+                    try:
+                        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                        if r.returncode == 0 and r.stdout.strip():
+                            selected = r.stdout.strip()
+                            break
+                    except Exception:
+                        pass
+        except Exception:
             selected = ""
         send_json({"ok": True, "path": selected if selected else ""})
         return True
