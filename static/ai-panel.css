@@ -34,6 +34,10 @@
   flex-direction: column;
   gap: 10px;
   transition: right .25s cubic-bezier(.4,0,.2,1);
+  pointer-events: none;
+}
+#ai-fab {
+  pointer-events: auto;
 }
 #ai-fab .fab-emoji { font-size: 22px; line-height: 1; }
 #ai-fab .fab-hint {
@@ -72,6 +76,7 @@
 
 /* ── Chat panel ──────────────────────────────────── */
 #ai-chat-panel {
+  display: none;
   position: fixed;
   top: 0;
   right: 0;
@@ -80,15 +85,12 @@
   background: #fff;
   box-shadow: -4px 0 32px rgba(0,0,0,.13);
   z-index: 1100;
-  display: flex;
   flex-direction: column;
-  transform: translateX(100%);
-  transition: transform .25s cubic-bezier(.4,0,.2,1);
   border-left: 1px solid #e5e7eb;
   container-type: inline-size;
 }
 #ai-chat-panel.open {
-  transform: translateX(0);
+  display: flex;
 }
 
 .ai-chat-header {

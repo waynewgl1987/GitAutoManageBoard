@@ -361,6 +361,7 @@ function onPerPageChange(sel, section){
 
 function escapeHtml(s){s=s==null?'':String(s);return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function escapeAttr(s){s=s==null?'':String(s);return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function escapeJS(s){return escapeAttr(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
 function addMsg(msg, cls) {
   cls=cls||'info';
@@ -1099,7 +1100,7 @@ function _branchSortHeader(){
   return '<div style="display:flex;gap:16px;padding:6px 14px 4px;border-bottom:1px solid #e5e7eb;margin-bottom:4px;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px">'+
     '<span style="flex:1;cursor:pointer;user-select:none" onclick="toggleBranchSort(\'name\')" title="Sort by name">Name'+ni+'</span>'+
     '<span style="width:160px;cursor:pointer;user-select:none;text-align:right" onclick="toggleBranchSort(\'date\')" title="Sort by date">Last Commit'+di+'</span>'+
-    '<span style="width:294px"></span>'+
+    '<span style="width:324px"></span>'+
     '</div>';
 }
 
@@ -1132,7 +1133,7 @@ function _renderBranches(data,perPage){
       var cls=isCur?' branch-item current':' branch-item';
       html+='<div id="'+wid+'">';
       html+='<div class="'+cls+'">';
-      html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeAttr(b.name)+'\')" title="Show full name">ⓘ</button>';
+      html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeJS(b.name)+'\')" title="Show full name">ⓘ</button>';
       html+='<span class="name" title="'+escapeAttr(b.name)+'">'+escapeHtml(b.name)+'</span>';
       html+='<span class="branch-date">'+escapeHtml(b.date||'')+'</span>';
       if(isCur){
@@ -1140,9 +1141,9 @@ function _renderBranches(data,perPage){
         html+='<button class="btn-branch-expand" style="visibility:hidden" disabled>▶</button>';
       }else{
         html+='<div class="branch-actions">';
-        html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\'local\')"><span style="line-height:1">⚖️</span><span>Compare</span></button>';
-        html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')"><span style="line-height:1">⚡</span><span>Merge</span></button>';
-        html+='<button class="btn btn-sm btn-checkout" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')"><span style="line-height:1">✅</span><span>Checkout</span></button>';
+        html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeJS(b.name)+'\',\'local\')"><span style="line-height:1">⚖️</span><span>Compare</span></button>';
+        html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeJS(b.name)+'\')"><span style="line-height:1">⚡</span><span>Merge</span></button>';
+        html+='<button class="btn btn-sm btn-checkout" data-branch="'+escapeAttr(b.name)+'" onclick="return branchCheckoutClick(this)"><span style="line-height:1">✅</span><span>Checkout</span></button>';
         html+='</div>';
         html+='<button class="btn-branch-expand" onclick="event.stopPropagation();toggleBranchExpand(\''+wid+'\')" title="Expand">▶</button>';
       }
@@ -1154,7 +1155,7 @@ function _renderBranches(data,perPage){
           html+='<span style="font-size:12px;color:#f59e0b;flex:1">🔒 Protected branch — delete disabled</span>';
         }else{
           html+='<span style="font-size:12px;color:#9ca3af;flex:1">Danger zone</span>';
-          html+='<button class="btn-del-branch" onclick="promptDeleteBranch(\''+escapeAttr(b.name)+'\',\'local\')">🗑 Delete Branch</button>';
+          html+='<button class="btn-del-branch" onclick="promptDeleteBranch(\''+escapeJS(b.name)+'\',\'local\')">🗑 Delete Branch</button>';
         }
         html+='</div>';
       }
@@ -1165,13 +1166,13 @@ function _renderBranches(data,perPage){
       var wid='bwrap-r-'+bi;
       html+='<div id="'+wid+'">';
       html+='<div class="branch-item">';
-      html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeAttr(b.name)+'\')" title="Show full name">ⓘ</button>';
+      html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeJS(b.name)+'\')" title="Show full name">ⓘ</button>';
       html+='<span class="name" title="'+escapeAttr(b.name)+'">'+escapeHtml(b.name)+'</span>';
       html+='<span class="branch-date">'+escapeHtml(b.date||'')+'</span>';
       html+='<div class="branch-actions">';
-      html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\'remote\')"><span style="line-height:1">⚖️</span><span>Compare</span></button>';
-      html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')"><span style="line-height:1">⚡</span><span>Merge</span></button>';
-      html+='<button class="btn btn-sm btn-checkout" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')"><span style="line-height:1">✅</span><span>Checkout</span></button>';
+      html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeJS(b.name)+'\',\'remote\')"><span style="line-height:1">⚖️</span><span>Compare</span></button>';
+      html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeJS(b.name)+'\')"><span style="line-height:1">⚡</span><span>Merge</span></button>';
+      html+='<button class="btn btn-sm btn-checkout" data-branch="'+escapeAttr(b.name)+'" onclick="return branchCheckoutClick(this)"><span style="line-height:1">✅</span><span>Checkout</span></button>';
       html+='</div>';
       html+='<button class="btn-branch-expand" onclick="event.stopPropagation();toggleBranchExpand(\''+wid+'\')" title="Expand">▶</button>';
       html+='</div>';
@@ -1181,7 +1182,7 @@ function _renderBranches(data,perPage){
         html+='<span style="font-size:12px;color:#f59e0b;flex:1">🔒 Protected branch — delete disabled</span>';
       }else{
         html+='<span style="font-size:12px;color:#9ca3af;flex:1">Danger zone</span>';
-        html+='<button class="btn-del-branch" onclick="promptDeleteBranch(\''+escapeAttr(b.name)+'\',\'remote\')">🗑 Delete Branch</button>';
+        html+='<button class="btn-del-branch" onclick="promptDeleteBranch(\''+escapeJS(b.name)+'\',\'remote\')">🗑 Delete Branch</button>';
       }
       html+='</div>';
       html+='</div>';
@@ -1249,9 +1250,9 @@ function promptDeleteBranch(branchName, defaultScope){
   var bodyHtml=
     '<p style="margin:0 0 14px;font-size:13px;color:#374151">Choose what to delete for branch <code style="background:#f3f4f6;padding:2px 6px;border-radius:4px;font-weight:700">'+escapeHtml(shortName)+'</code>:</p>'
     +'<div style="display:flex;flex-direction:column;gap:8px">'
-    +'<button onclick="_delBranchScope(\''+escapeAttr(branchName)+'\',\'local\')" style="padding:10px 14px;border-radius:8px;border:1.5px solid #d1d5db;background:#f9fafb;cursor:pointer;text-align:left;font-size:13px;display:flex;align-items:center;gap:8px">'
+    +'<button onclick="_delBranchScope(\''+escapeJS(branchName)+'\',\'local\')" style="padding:10px 14px;border-radius:8px;border:1.5px solid #d1d5db;background:#f9fafb;cursor:pointer;text-align:left;font-size:13px;display:flex;align-items:center;gap:8px">'
     +'<span style="font-size:18px">💻</span><div><div style="font-weight:600;color:#111827">Delete Local Branch</div><div style="font-size:11px;color:#6b7280;margin-top:2px">Removes only the local copy. Remote is untouched.</div></div></button>'
-    +'<button onclick="_delBranchScope(\''+escapeAttr(branchName)+'\',\'remote\')" style="padding:10px 14px;border-radius:8px;border:1.5px solid #fca5a5;background:#fff5f5;cursor:pointer;text-align:left;font-size:13px;display:flex;align-items:center;gap:8px">'
+    +'<button onclick="_delBranchScope(\''+escapeJS(branchName)+'\',\'remote\')" style="padding:10px 14px;border-radius:8px;border:1.5px solid #fca5a5;background:#fff5f5;cursor:pointer;text-align:left;font-size:13px;display:flex;align-items:center;gap:8px">'
     +'<span style="font-size:18px">☁️</span><div><div style="font-weight:600;color:#b91c1c">Delete Remote Branch</div><div style="font-size:11px;color:#dc2626;margin-top:2px">⚠️ Permanently removes from the remote server.</div></div></button>'
     +'</div>';
   showModal('🗑 Delete Branch', bodyHtml, null, null);
@@ -1365,16 +1366,31 @@ function _doDeleteRemote(branchName, shortName){
 
 
 
+function branchCheckoutClick(btn){
+  var branchName = btn.getAttribute('data-branch');
+  if (!branchName) return false;
+  event.stopPropagation();
+  checkoutBranch(branchName);
+  return false;
+}
+
 function checkoutBranch(branchName){
-  apiGet('/api/has-uncommitted',function(data){
-    if(data.hasChanges){
-      showModal(t('stash_switched'),t('stash_prompt')+branchName+'?',t('stash_switched'),function(){
-        apiPost('/api/stash',{},function(stashData){
-          doCheckout(branchName, true);  // true = had stash
-        });
-      });
-    }else doCheckout(branchName, false);
-  });
+  _showSpinner();
+  fetch(API_BASE+'/api/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({branch:branchName})})
+    .then(function(r){return r.json()})
+    .then(function(data){
+      _hideSpinner();
+      if(data.ok){
+        addMsg('✅ Switched to ' + branchName, 'success');
+        setTimeout(function(){ window.location.reload(); }, 800);
+      }else{
+        addMsg(t('switch_fail')+(data.error||''),'error');
+      }
+    })
+    .catch(function(e){
+      _hideSpinner();
+      addMsg(t('switch_fail')+(e.message||'network error'),'error');
+    });
 }
 
 function doCheckout(branchName, hadStash){
@@ -2168,7 +2184,7 @@ function _renderFilteredBranches(search){
     var isCur=b.name===data.current;
     var cls=isCur?' branch-item current':' branch-item';
     html+='<div class="'+cls+'">';
-    html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeAttr(b.name)+'\')" title="Show full name">ⓘ</button>';
+    html+='<button class="btn-branch-info" onclick="event.stopPropagation();showBranchNamePopover(this,\''+escapeJS(b.name)+'\')" title="Show full name">ⓘ</button>';
     html+='<span style="font-size:11px;padding:1px 6px;border-radius:99px;margin-right:6px;flex-shrink:0;background:'+(b.type==='local'?'#dbeafe':'#e0f2fe')+';color:'+(b.type==='local'?'#1e40af':'#0369a1')+'">'+b.type+'</span>';
     html+='<span class="name" title="'+escapeAttr(b.name)+'">'+_highlightBranchMatch(escapeHtml(b.name),search)+'</span>';
     html+='<span class="branch-date">'+escapeHtml(b.date||'')+'</span>';
@@ -2177,9 +2193,9 @@ function _renderFilteredBranches(search){
       html+='<button class="btn-branch-expand" style="visibility:hidden" disabled>▶</button>';
     }else{
       html+='<div class="branch-actions">';
-      html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeAttr(b.name)+'\',\''+(b.type==='local'?'local':'remote')+'\')">⚖️ Compare</button>';
-      html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeAttr(b.name)+'\')">⚡ Merge</button>';
-      html+='<button class="btn btn-sm btn-checkout" onclick="event.stopPropagation();checkoutBranch(\''+escapeAttr(b.name)+'\')">✅ Checkout</button>';
+      html+='<button class="btn btn-sm btn-compare" onclick="event.stopPropagation();openCompare(\''+escapeJS(b.name)+'\',\''+(b.type==='local'?'local':'remote')+'\')">⚖️ Compare</button>';
+      html+='<button class="btn btn-sm btn-merge" onclick="event.stopPropagation();mergeBranch(\''+escapeJS(b.name)+'\')">⚡ Merge</button>';
+      html+='<button class="btn btn-sm btn-checkout" data-branch="'+escapeAttr(b.name)+'" onclick="return branchCheckoutClick(this)">✅ Checkout</button>';
       html+='</div>';
       html+='<button class="btn-branch-expand" style="visibility:hidden" disabled>▶</button>';
     }
@@ -2200,7 +2216,7 @@ function showBranchNamePopover(btn, name) {
   pop.className = 'branch-name-popover';
   pop._triggerBtn = btn;
   pop.innerHTML = '<span class="pop-name">'+escapeHtml(name)+'</span>'
-    + '<button class="pop-copy" onclick="navigator.clipboard.writeText(\''+escapeAttr(name)+'\').then(function(){this.textContent=\'✓ Copied\';}.bind(this))">📋 Copy</button>';
+    + '<button class="pop-copy" onclick="navigator.clipboard.writeText(\''+escapeJS(name)+'\').then(function(){this.textContent=\'✓ Copied\';}.bind(this))">📋 Copy</button>';
   document.body.appendChild(pop);
   var rect = btn.getBoundingClientRect();
   var popW = 320;
