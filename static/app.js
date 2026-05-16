@@ -688,7 +688,7 @@ function _renderProjectSwitcher(){
     var path = typeof entry === 'string' ? entry : entry.path;
     var ts = typeof entry === 'string' ? 0 : (entry.ts || 0);
     var timeStr = ts ? new Date(ts).toLocaleString() : '';
-    html += '<div class="psp-hist-item" onclick="switchToProject(\'' + escapeAttr(path) + '\')">';
+    html += '<div class="psp-hist-item" onclick="switchToProject(\'' + escapeJS(path) + '\')">';
     html += '<span class="psp-hist-item-icon">📁</span>';
     html += '<span class="psp-hist-item-info">';
     html += '<div class="psp-hist-item-path">' + escapeHtml(path) + '</div>';
