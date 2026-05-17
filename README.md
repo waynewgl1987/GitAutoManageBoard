@@ -13,6 +13,9 @@
 
 [English](#english) · [中文](#中文)
 
+2026/05/17:
+v1.0.1 update: Add worktree feature.
+
 </div>
 
 ---
