@@ -1696,11 +1696,28 @@ function _renderBranches(data,perPage){
     pag.innerHTML = _renderSmartPaginationHTML('branches');
 }
 
+function sanitizeBranchName(name){
+  // Replace whitespace and git-invalid chars with underscore, per git check-ref-format rules
+  var s = name
+    .replace(/[\s~^:?*\[\\]/g, '_')   // spaces and explicitly forbidden chars
+    .replace(/@\{/g, '_')              // @{ sequence
+    .replace(/\.\./g, '_')             // consecutive dots
+    .replace(/\/\//g, '/')             // consecutive slashes
+    .replace(/\.lock$/i, '_lock')      // cannot end with .lock
+    .replace(/^[.\-]/, '_')            // cannot start with . or -
+    .replace(/\.$/, '_')               // cannot end with .
+    .replace(/_+/g, '_');              // collapse multiple underscores
+  return s;
+}
+
 function createNewBranch(){
-  var name=document.getElementById('new-branch-name').value.trim();
-  if(!name){addMsg(t('enter_branch_name'),'error');return}
+  var raw=document.getElementById('new-branch-name').value.trim();
+  if(!raw){addMsg(t('enter_branch_name'),'error');return}
+  var name=sanitizeBranchName(raw);
   var curName=document.getElementById('branch-name').textContent;
-  showModal('Create Branch','Create new branch <b>'+escapeHtml(name)+'</b><br><br>Based on: <span style="background:#1e40af;color:#fff;padding:2px 10px;border-radius:99px;font-weight:700">'+escapeHtml(curName)+'</span>','Create',function(){
+  var nameInfo='<b>'+escapeHtml(name)+'</b>';
+  if(name!==raw) nameInfo='<b>'+escapeHtml(name)+'</b><br><small style="color:#facc15">⚠ Renamed from: '+escapeHtml(raw)+'</small>';
+  showModal('Create Branch','Create new branch '+nameInfo+'<br><br>Based on: <span style="background:#1e40af;color:#fff;padding:2px 10px;border-radius:99px;font-weight:700">'+escapeHtml(curName)+'</span>','Create',function(){
     apiPost('/api/create-branch',{name:name},function(data){
       if(data.ok){
         document.getElementById('new-branch-name').value='';loadBranches();loadCurrentBranch();
